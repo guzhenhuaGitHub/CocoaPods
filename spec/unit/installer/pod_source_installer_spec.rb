@@ -46,12 +46,52 @@ module Pod
         UI.warnings.length.should.equal(0)
       end
 
-      it 'shows a warning if the source is unencrypted (e.g. http)' do
+      it 'shows a warning if the source is unencrypted with http://' do
         @spec.source = { :http => 'http://orta.io/sdk.zip' }
         dummy_response = Pod::Downloader::Response.new
         Downloader.stubs(:download).returns(dummy_response)
         @installer.install!
-        UI.warnings.should.include 'Please reach out to the library author to notify them of this security issue'
+        UI.warnings.should.include 'uses the unencrypted \'http\' protocol'
+      end
+
+      it 'does not show a warning if the source is http://localhost' do
+        @spec.source = { :http => 'http://localhost:123/sdk.zip' }
+        dummy_response = Pod::Downloader::Response.new
+        Downloader.stubs(:download).returns(dummy_response)
+        @installer.install!
+        UI.warnings.length.should.equal(0)
+      end
+
+      it 'shows a warning if the source is unencrypted with git://' do
+        @spec.source = { :git => 'git://git.orta.io/orta.git' }
+        dummy_response = Pod::Downloader::Response.new
+        Downloader.stubs(:download).returns(dummy_response)
+        @installer.install!
+        UI.warnings.should.include 'uses the unencrypted \'git\' protocol'
+      end
+
+      it 'does not warn for local repositories with spaces' do
+        @spec.source = { :git => '/Users/kylef/Projects X', :tag => '1.0' }
+        dummy_response = Pod::Downloader::Response.new
+        Downloader.stubs(:download).returns(dummy_response)
+        @installer.install!
+        UI.warnings.length.should.equal(0)
+      end
+
+      it 'does not warn for SSH repositories' do
+        @spec.source = { :git => 'git@bitbucket.org:kylef/test.git', :tag => '1.0' }
+        dummy_response = Pod::Downloader::Response.new
+        Downloader.stubs(:download).returns(dummy_response)
+        @installer.install!
+        UI.warnings.length.should.equal(0)
+      end
+
+      it 'does not warn for SSH repositories on Github' do
+        @spec.source = { :git => 'git@github.com:kylef/test.git', :tag => '1.0' }
+        dummy_response = Pod::Downloader::Response.new
+        Downloader.stubs(:download).returns(dummy_response)
+        @installer.install!
+        UI.warnings.length.should.equal(0)
       end
 
       #--------------------------------------#

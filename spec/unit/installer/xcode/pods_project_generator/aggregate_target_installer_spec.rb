@@ -16,7 +16,6 @@ module Pod
               @target_definition = @podfile.target_definitions['SampleProject']
               @project = Project.new(config.sandbox.project_path)
 
-              config.sandbox.project = @project
               path_list = Sandbox::PathList.new(fixture('banana-lib'))
               @spec = fixture_spec('banana-lib/BananaLib.podspec')
               @spec.prefix_header_contents = '#import "BlocksKit.h"'
@@ -41,6 +40,8 @@ module Pod
             end
 
             it 'adds file references for the support files of the target' do
+              @target.stubs(:includes_frameworks?).returns(true)
+              @target.stubs(:includes_resources?).returns(true)
               @installer.install!
               group = @project.support_files_group['Pods-SampleProject']
               group.children.map(&:display_name).sort.should == [
@@ -54,6 +55,11 @@ module Pod
                 'Pods-SampleProject.release.xcconfig',
                 'Pods-SampleProject.test.xcconfig',
               ]
+            end
+
+            it 'cleans up temporary directories' do
+              @installer.expects(:clean_support_files_temp_dir).once
+              @installer.install!
             end
 
             #--------------------------------------#
@@ -133,15 +139,24 @@ module Pod
               @installer.install!
             end
 
-            it 'creates a create copy resources script' do
+            it 'creates a create copy resources script if resources exist' do
               @installer.install!
               support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
               script = support_files_dir + 'Pods-SampleProject-resources.sh'
               script.read.should.include?('logo-sidebar.png')
             end
 
+            it 'does not a create copy resources script if there are no resources' do
+              @target.stubs(:includes_resources?).returns(false)
+              @installer.install!
+              support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
+              script = support_files_dir + 'Pods-SampleProject-resources.sh'
+              script.exist?.should.be.false
+            end
+
             it 'does not add framework resources to copy resources script' do
-              @pod_target.stubs(:requires_frameworks? => true)
+              @target.stubs(:includes_resources?).returns(true)
+              @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
               @installer.install!
               support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
               script = support_files_dir + 'Pods-SampleProject-resources.sh'
@@ -169,7 +184,7 @@ module Pod
             end
 
             it 'does add pods to the embed frameworks script' do
-              @pod_target.stubs(:requires_frameworks? => true)
+              @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
               @target.stubs(:requires_frameworks? => true)
               @installer.install!
               support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
@@ -194,8 +209,9 @@ module Pod
 
             it 'does not add pods to the embed frameworks script if they are not to be built' do
               @pod_target.stubs(:should_build? => false)
-              @pod_target.stubs(:requires_frameworks? => true)
+              @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
               @target.stubs(:requires_frameworks? => true)
+              @target.stubs(:includes_frameworks? => true)
               @installer.install!
               support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
               script = support_files_dir + 'Pods-SampleProject-frameworks.sh'
@@ -203,9 +219,9 @@ module Pod
             end
 
             it 'does not add pods to the embed frameworks script if they are static' do
-              @pod_target.stubs(:static_framework? => true)
-              @pod_target.stubs(:requires_frameworks? => true)
+              @pod_target.stubs(:build_type => Target::BuildType.static_framework)
               @target.stubs(:requires_frameworks? => true)
+              @target.stubs(:includes_frameworks? => true)
               @installer.install!
               support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
               script = support_files_dir + 'Pods-SampleProject-frameworks.sh'
@@ -232,7 +248,7 @@ module Pod
             end
 
             it 'creates an embed frameworks script, if the target does not require a host target' do
-              @pod_target.stubs(:requires_frameworks? => true)
+              @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
               @target.stubs(:requires_frameworks? => true)
               @installer.install!
               support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
@@ -241,9 +257,19 @@ module Pod
             end
 
             it 'does not create an embed frameworks script, if the target requires a host target' do
-              @pod_target.stubs(:requires_frameworks? => true)
+              @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
               @target.stubs(:requires_frameworks? => true)
               @target.stubs(:requires_host_target? => true)
+              @installer.install!
+              support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
+              script = support_files_dir + 'Pods-SampleProject-frameworks.sh'
+              File.exist?(script).should == false
+            end
+
+            it 'does not create an embed frameworks script, if the target does not have frameworks to embed' do
+              @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
+              @target.stubs(:requires_frameworks? => true)
+              @target.stubs(:includes_frameworks? => false)
               @installer.install!
               support_files_dir = config.sandbox.target_support_files_dir('Pods-SampleProject')
               script = support_files_dir + 'Pods-SampleProject-frameworks.sh'
@@ -260,8 +286,8 @@ module Pod
             end
 
             it 'installs umbrella headers for frameworks' do
-              @pod_target.stubs(:requires_frameworks? => true)
-              @target.stubs(:requires_frameworks? => true)
+              @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
+              @target.stubs(:build_type => Target::BuildType.static_framework, :host_requires_frameworks? => true)
               build_files = @installer.install!.native_target.headers_build_phase.files
               build_file = build_files.find { |bf| bf.file_ref.path.include?('Pods-SampleProject-umbrella.h') }
               build_file.should.not.be.nil
@@ -271,6 +297,8 @@ module Pod
             it 'does not create xcconfigs for non existent user build configurations' do
               target = AggregateTarget.new(config.sandbox, false, { 'Debug' => :debug }, [], @platform,
                                            @target_definition, config.sandbox.root.dirname, nil, nil, {})
+              target.stubs(:includes_resources?).returns(true)
+              target.stubs(:includes_frameworks?).returns(true)
               @installer = AggregateTargetInstaller.new(config.sandbox, @project, target)
               @installer.install!
               group = @project.support_files_group['Pods-SampleProject']

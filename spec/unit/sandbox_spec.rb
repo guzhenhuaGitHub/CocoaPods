@@ -26,10 +26,6 @@ module Pod
         @sandbox.manifest.should.nil?
       end
 
-      it 'returns the project' do
-        @sandbox.project.should.nil?
-      end
-
       it 'returns the public headers store' do
         @sandbox.public_headers.root.should ==
           temporary_directory + 'Sandbox/Headers/Public'
@@ -41,8 +37,11 @@ module Pod
         @sandbox.specifications_root.mkpath
         @sandbox.store_podspec('BananaLib', fixture('banana-lib/BananaLib.podspec'))
         specification_path = @sandbox.specification_path('BananaLib')
+        pod_project_path = @sandbox.pod_target_project_path('BananaLib')
+        pod_project_path.mkpath
         @sandbox.clean_pod('BananaLib')
         pod_root.should.not.exist
+        pod_project_path.should.not.exist
         specification_path.should.not.exist
       end
 

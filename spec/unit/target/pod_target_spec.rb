@@ -4,10 +4,8 @@ module Pod
   describe PodTarget do
     before do
       @banana_spec = fixture_spec('banana-lib/BananaLib.podspec')
-      @target_definition = Podfile::TargetDefinition.new('Pods', nil)
-      @target_definition.abstract = false
-      @pod_target = PodTarget.new(config.sandbox, false, {}, [],
-                                  Platform.ios, [@banana_spec], [@target_definition])
+      @target_definition = fixture_target_definition
+      @pod_target = fixture_pod_target(@banana_spec, false, {}, [], Platform.ios, [@target_definition])
     end
 
     describe 'Meta' do
@@ -88,13 +86,13 @@ module Pod
         @pod_target.should_build?.should == false
       end
 
-      it 'builds a pod target if there are no actual source files but there are script phases' do
+      it 'does not build a pod target if there are no actual source files but there are script phases' do
         fa = Sandbox::FileAccessor.new(nil, @banana_spec.consumer(Platform.ios))
         fa.stubs(:source_files).returns([Pathname.new('foo.h')])
         @pod_target.stubs(:file_accessors).returns([fa])
         @pod_target.root_spec.script_phase = { :name => 'Hello World', :script => 'echo "Hello World"' }
 
-        @pod_target.should_build?.should == true
+        @pod_target.should_build?.should == false
       end
     end
 
@@ -123,14 +121,49 @@ module Pod
     end
 
     describe 'swift version' do
+      it 'returns the swift version with the given requirements from the target definition' do
+        @target_definition.store_swift_version_requirements('>= 4.0')
+        @pod_target.root_spec.stubs(:swift_versions).returns([Version.new('3.0'), Version.new('4.0')])
+        @pod_target.swift_version.should == '4.0'
+      end
+
+      it 'returns the swift version with the given requirements from all target definitions' do
+        target_definition_one = fixture_target_definition('App1')
+        target_definition_one.store_swift_version_requirements('>= 4.0')
+        target_definition_two = fixture_target_definition('App2')
+        target_definition_two.store_swift_version_requirements('= 4.2')
+        pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@banana_spec], [target_definition_one,
+                                                                                                 target_definition_two])
+        @pod_target.root_spec.stubs(:swift_versions).returns([Version.new('3.0'), Version.new('4.0'),
+                                                              Version.new('4.2')])
+        pod_target.swift_version.should == '4.2'
+      end
+
+      it 'returns an empty swift version if none of the requirements match' do
+        target_definition_one = fixture_target_definition('App1')
+        target_definition_one.store_swift_version_requirements('>= 4.0')
+        target_definition_two = fixture_target_definition('App2')
+        target_definition_two.store_swift_version_requirements('= 4.2')
+        pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@banana_spec], [target_definition_one,
+                                                                                                 target_definition_two])
+        @pod_target.root_spec.stubs(:swift_versions).returns([Version.new('3.0'), Version.new('4.0')])
+        pod_target.swift_version.should == ''
+      end
+
       it 'uses the swift version defined in the specification' do
-        @pod_target.root_spec.stubs(:swift_version).returns('3.0')
+        @pod_target.root_spec.stubs(:swift_versions).returns([Version.new('3.0')])
         @target_definition.stubs(:swift_version).returns('2.3')
         @pod_target.swift_version.should == '3.0'
       end
 
-      it 'uses the swift version defined by the target definitions if no swift version is specifed in the spec' do
-        @pod_target.root_spec.stubs(:swift_version).returns(nil)
+      it 'uses the max swift version defined in the specification' do
+        @pod_target.root_spec.stubs(:swift_versions).returns([Version.new('3.0'), Version.new('4.0')])
+        @target_definition.stubs(:swift_version).returns('2.3')
+        @pod_target.swift_version.should == '4.0'
+      end
+
+      it 'uses the swift version defined by the target definitions if no swift version is specified in the spec' do
+        @pod_target.root_spec.stubs(:swift_versions).returns([])
         @target_definition.stubs(:swift_version).returns('2.3')
         @pod_target.swift_version.should == '2.3'
       end
@@ -296,8 +329,8 @@ module Pod
           @pod_target.sandbox.public_headers.add_search_path('BananaLib', Platform.ios)
           @pod_target.sandbox.public_headers.add_search_path('monkey', Platform.ios)
           monkey_spec = fixture_spec('monkey/monkey.podspec')
-          monkey_pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [monkey_spec], [@target_definition])
-          monkey_pod_target.stubs(:platform).returns(Platform.ios)
+          monkey_pod_target = PodTarget.new(config.sandbox, false, {}, [],
+                                            Platform.ios, [monkey_spec], [@target_definition])
           @pod_target.stubs(:dependent_targets).returns([monkey_pod_target])
           header_search_paths = @pod_target.header_search_paths
           header_search_paths.sort.should == [
@@ -342,6 +375,56 @@ module Pod
             '${PODS_ROOT}/Headers/Public',
           ]
         end
+      end
+    end
+
+    describe '#defines_module?' do
+      it 'returns false when building as a library' do
+        @pod_target.should.not.defines_module
+      end
+
+      it 'returns true when building as a framework' do
+        @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
+        @pod_target.should.defines_module
+      end
+
+      it 'returns true when building as a static framework' do
+        @pod_target.stubs(:build_type => Target::BuildType.static_framework)
+        @pod_target.should.defines_module
+      end
+
+      it 'returns true when the target definition says to' do
+        @target_definition.set_use_modular_headers_for_pod('BananaLib', true)
+        @pod_target.should.defines_module
+      end
+
+      it 'returns false when any target definition says to' do
+        @target_definition.set_use_modular_headers_for_pod('BananaLib', true)
+
+        other_target_definition = fixture_target_definition('Other')
+        other_target_definition.store_pod('BananaLib')
+
+        @pod_target.stubs(:target_definitions).returns([@target_definition, other_target_definition])
+
+        @pod_target.should.not.defines_module
+      end
+
+      it 'warns if multiple target definitions do not agree on whether to use a module or not' do
+        banana_spec = fixture_spec('banana-lib/BananaLib.podspec')
+        first_target_definition = fixture_target_definition('SampleApp')
+        first_target_definition.abstract = false
+        first_target_definition.store_pod('BananaLib', [])
+        first_target_definition.set_use_modular_headers_for_pod('BananaLib', true)
+        second_target_definition = fixture_target_definition('SampleApp2')
+        second_target_definition.abstract = false
+        second_target_definition.store_pod('BananaLib', [])
+        second_target_definition.set_use_modular_headers_for_pod('BananaLib', false)
+        pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [banana_spec],
+                                   [first_target_definition, second_target_definition])
+        pod_target.should.not.defines_module
+        UI.warnings.should.include 'Unable to determine whether to build `BananaLib` as a module due to a conflict ' \
+          "between the following target definitions:\n\t- `Pods-SampleApp` requires `BananaLib` as a module\n\t- " \
+          "`Pods-SampleApp2` does not require `BananaLib` as a module\n\nDefaulting to skip building `BananaLib` as a module.\n"
       end
     end
 
@@ -496,29 +579,20 @@ module Pod
 
       describe 'test spec support' do
         before do
-          @coconut_spec = fixture_spec('coconut-lib/CoconutLib.podspec')
+          @watermelon_spec = fixture_spec('watermelon-lib/WatermelonLib.podspec')
           @test_spec_target_definition = Podfile::TargetDefinition.new('Pods', nil)
           @test_spec_target_definition.abstract = false
-          @platform = Platform.new(:ios, '6.0')
-          @test_pod_target = PodTarget.new(config.sandbox, false, {}, [],
-                                           @platform, [@coconut_spec, *@coconut_spec.recursive_subspecs],
-                                           [@test_spec_target_definition])
+          @test_pod_target = fixture_pod_target_with_specs([@watermelon_spec, *@watermelon_spec.recursive_subspecs],
+                                                           true, {}, [], Platform.new(:ios, '6.0'),
+                                                           [@test_spec_target_definition])
         end
 
         it 'returns that it has test specifications' do
           @test_pod_target.contains_test_specifications?.should == true
         end
 
-        it 'returns supported test types' do
-          @test_pod_target.supported_test_types.should == [:unit]
-        end
-
         it 'returns test label based on test type' do
-          @test_pod_target.test_target_label(:unit).should == 'CoconutLib-Unit-Tests'
-        end
-
-        it 'returns app host label based on test type' do
-          @test_pod_target.app_host_label(:unit).should == 'AppHost-iOS-Unit-Tests'
+          @test_pod_target.test_target_label(@test_pod_target.test_specs.first).should == 'WatermelonLib-Unit-Tests'
         end
 
         it 'returns the correct product type for test type' do
@@ -526,109 +600,47 @@ module Pod
         end
 
         it 'raises for unknown test type' do
-          exception = lambda { @test_pod_target.product_type_for_test_type(:weird_test_type) }.should.raise Informative
+          exception = lambda { @test_pod_target.product_type_for_test_type(:weird_test_type) }.should.raise ArgumentError
           exception.message.should.include 'Unknown test type `weird_test_type`.'
         end
 
-        it 'returns the correct test type for product type' do
-          @test_pod_target.test_type_for_product_type(:unit_test_bundle).should == :unit
-        end
-
-        it 'raises for unknown product type' do
-          exception = lambda { @test_pod_target.test_type_for_product_type(:weird_product_type) }.should.raise Informative
-          exception.message.should.include 'Unknown product type `weird_product_type`'
-        end
-
-        it 'returns correct app host info plist path for test type' do
-          @test_pod_target.app_host_info_plist_path_for_test_type(:unit).to_s.should.include 'Pods/Target Support Files/CoconutLib/AppHost-iOS-Unit-Tests-Info.plist'
-        end
-
         it 'returns correct copy resources script path for test unit test type' do
-          @test_pod_target.copy_resources_script_path_for_test_type(:unit).to_s.should.include 'Pods/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-resources.sh'
+          @test_pod_target.copy_resources_script_path_for_spec(@test_pod_target.test_specs.first).to_s.should.include 'Pods/Target Support Files/WatermelonLib/WatermelonLib-Unit-Tests-resources.sh'
         end
 
         it 'returns correct embed frameworks script path for test unit test type' do
-          @test_pod_target.embed_frameworks_script_path_for_test_type(:unit).to_s.should.include 'Pods/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-frameworks.sh'
+          @test_pod_target.embed_frameworks_script_path_for_spec(@test_pod_target.test_specs.first).to_s.should.include 'Pods/Target Support Files/WatermelonLib/WatermelonLib-Unit-Tests-frameworks.sh'
         end
 
         it 'returns correct prefix header path for test unit test type' do
-          @test_pod_target.prefix_header_path_for_test_type(:unit).to_s.should.include 'Pods/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-prefix.pch'
+          @test_pod_target.prefix_header_path_for_spec(@test_pod_target.test_specs.first).to_s.should.include 'Pods/Target Support Files/WatermelonLib/WatermelonLib-Unit-Tests-prefix.pch'
         end
 
         it 'returns correct path for info plist for unit test type' do
-          @test_pod_target.info_plist_path_for_test_type(:unit).to_s.should.include 'Pods/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-Info.plist'
+          @test_pod_target.info_plist_path_for_spec(@test_pod_target.test_specs.first).to_s.should.include 'Pods/Target Support Files/WatermelonLib/WatermelonLib-Unit-Tests-Info.plist'
         end
 
-        it 'returns the correct resource path for test resource bundles' do
-          fa = Sandbox::FileAccessor.new(nil, @coconut_spec.test_specs.first.consumer(@platform))
-          fa.stubs(:resource_bundles).returns('TestResourceBundle' => [Pathname.new('Model.xcdatamodeld')])
-          fa.stubs(:resources).returns([])
-          fa.stubs(:spec).returns(stub(:test_specification? => true))
-          @test_pod_target.stubs(:file_accessors).returns([fa])
-          @test_pod_target.resource_paths.should == ['${PODS_CONFIGURATION_BUILD_DIR}/TestResourceBundle.bundle']
+        it 'returns the correct resource paths' do
+          @test_pod_target.resource_paths.should == {
+            'WatermelonLib' => [],
+            'WatermelonLib/Tests' => ['${PODS_CONFIGURATION_BUILD_DIR}/WatermelonLibTestResources.bundle'],
+            'WatermelonLib/SnapshotTests' => [],
+          }
         end
 
-        it 'includes framework paths from test specifications' do
-          fa = Sandbox::FileAccessor.new(nil, @coconut_spec.test_specs.first.consumer(@platform))
-          fa.stubs(:vendored_dynamic_artifacts).returns([config.sandbox.root + Pathname.new('Vendored/Vendored.framework')])
-          fa.stubs(:spec).returns(stub(:test_specification? => false))
-          test_fa = Sandbox::FileAccessor.new(nil, @coconut_spec.test_specs.first.consumer(@platform))
-          test_fa.stubs(:vendored_dynamic_artifacts).returns([config.sandbox.root + Pathname.new('Vendored/TestVendored.framework')])
-          test_fa.stubs(:spec).returns(stub(:test_specification? => true))
-          @test_pod_target.stubs(:file_accessors).returns([fa, test_fa])
-          @test_pod_target.stubs(:should_build?).returns(true)
-          @test_pod_target.framework_paths.should == [
-            { :name => 'Vendored.framework',
-              :input_path => '${PODS_ROOT}/Vendored/Vendored.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/Vendored.framework' },
-            { :name => 'TestVendored.framework',
-              :input_path => '${PODS_ROOT}/Vendored/TestVendored.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/TestVendored.framework' },
-          ]
+        it 'returns the correct framework paths' do
+          @test_pod_target.framework_paths.should == {
+            'WatermelonLib' => [
+              Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/WatermelonLib/WatermelonLib.framework'),
+            ],
+            'WatermelonLib/Tests' => [],
+            'WatermelonLib/SnapshotTests' => [],
+          }
         end
 
-        it 'excludes framework paths from test specifications when not requested' do
-          fa = Sandbox::FileAccessor.new(nil, @coconut_spec.consumer(@platform))
-          fa.stubs(:vendored_dynamic_artifacts).returns([config.sandbox.root + Pathname.new('Vendored/Vendored.framework')])
-          fa.stubs(:spec).returns(stub(:test_specification? => false))
-          test_fa = Sandbox::FileAccessor.new(nil, @coconut_spec.test_specs.first.consumer(@platform))
-          test_fa.stubs(:vendored_dynamic_artifacts).returns([config.sandbox.root + Pathname.new('Vendored/TestVendored.framework')])
-          test_fa.stubs(:spec).returns(stub(:test_specification? => true))
-          @test_pod_target.stubs(:file_accessors).returns([fa, test_fa])
-          @test_pod_target.stubs(:should_build?).returns(true)
-          @test_pod_target.framework_paths(false).should == [
-            { :name => 'Vendored.framework',
-              :input_path => '${PODS_ROOT}/Vendored/Vendored.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/Vendored.framework' },
-          ]
-        end
-
-        it 'includes resource paths from test specifications' do
-          config.sandbox.stubs(:project => stub(:path => Pathname.new('ProjectPath')))
-          fa = Sandbox::FileAccessor.new(nil, @coconut_spec.consumer(@platform))
-          fa.stubs(:resource_bundles).returns({})
-          fa.stubs(:resources).returns([Pathname.new('Model.xcdatamodeld')])
-          fa.stubs(:spec).returns(stub(:test_specification? => false))
-          test_fa = Sandbox::FileAccessor.new(nil, @coconut_spec.test_specs.first.consumer(@platform))
-          test_fa.stubs(:resource_bundles).returns({})
-          test_fa.stubs(:resources).returns([Pathname.new('TestModel.xcdatamodeld')])
-          test_fa.stubs(:spec).returns(stub(:test_specification? => true))
-          @test_pod_target.stubs(:file_accessors).returns([fa, test_fa])
-          @test_pod_target.resource_paths.should == ['${PODS_ROOT}/Model.xcdatamodeld', '${PODS_ROOT}/TestModel.xcdatamodeld']
-        end
-
-        it 'excludes resource paths from test specifications when not requested' do
-          config.sandbox.stubs(:project => stub(:path => Pathname.new('ProjectPath')))
-          fa = Sandbox::FileAccessor.new(nil, @coconut_spec.consumer(@platform))
-          fa.stubs(:resource_bundles).returns({})
-          fa.stubs(:resources).returns([Pathname.new('Model.xcdatamodeld')])
-          fa.stubs(:spec).returns(stub(:test_specification? => false))
-          test_fa = Sandbox::FileAccessor.new(nil, @coconut_spec.test_specs.first.consumer(@platform))
-          test_fa.stubs(:resource_bundles).returns({})
-          test_fa.stubs(:resources).returns([Pathname.new('TestModel.xcdatamodeld')])
-          test_fa.stubs(:spec).returns(stub(:test_specification? => true))
-          @test_pod_target.stubs(:file_accessors).returns([fa, test_fa])
-          @test_pod_target.resource_paths(false).should == ['${PODS_ROOT}/Model.xcdatamodeld']
+        it 'returns correct whether a test spec uses Swift or not' do
+          @test_pod_target.uses_swift_for_non_library_spec?(@test_pod_target.test_specs[0]).should.be.true
+          @test_pod_target.uses_swift_for_non_library_spec?(@test_pod_target.test_specs[1]).should.be.false
         end
       end
     end

@@ -15,7 +15,7 @@ module Pod
         before do
           @target_definition = fixture_target_definition
           @specs = specs
-          @specs.first.user_target_xcconfig = { 'OTHER_LDFLAGS' => '-no_compact_unwind' } unless @specs.empty?
+          @specs.first.user_target_xcconfig = { 'OTHER_LDFLAGS' => '-no_compact_unwind', 'USE_HEADERMAP' => 'NO' } unless @specs.empty?
           @specs.first.pod_target_xcconfig = { 'CLANG_CXX_LANGUAGE_STANDARD' => 'c++11' } unless @specs.empty?
           @pod_targets = @specs.map { |spec| pod_target(spec, @target_definition) }
           @target = fixture_aggregate_target(@pod_targets, false, { 'Release' => :release }, [], Platform.new(:ios, '6.0'), @target_definition)
@@ -58,7 +58,7 @@ module Pod
           before do
             @consumer = @pod_targets.first.spec_consumers.last
             @podfile = @target.target_definition.podfile
-            @xcconfig = @generator.generate
+            @xcconfig = @generator.dup.generate
           end
 
           it 'generates the xcconfig' do
@@ -100,6 +100,10 @@ module Pod
 
           it 'inherits the parent GCC_PREPROCESSOR_DEFINITIONS value' do
             @xcconfig.to_hash['GCC_PREPROCESSOR_DEFINITIONS'].should.include '$(inherited)'
+          end
+
+          it 'excludes the `USE_HEADERMAP` from the user project' do
+            @xcconfig.to_hash['USE_HEADERMAP'].should.be.nil
           end
         end
 
@@ -146,23 +150,35 @@ module Pod
             @xcconfig.to_hash['HEADER_SEARCH_PATHS'].should == expected
           end
 
-          it 'adds the sandbox public headers search paths to the xcconfig, with quotes, as system headers' do
-            expected = "$(inherited) -isystem \"#{config.sandbox.public_headers.search_paths(Platform.ios).join('" -isystem "')}\""
-            @xcconfig.to_hash['OTHER_CFLAGS'].should == expected
+          describe 'with a pod target inhibiting warnings' do
+            def pod_target(spec, target_definition)
+              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition]).tap { |pt| pt.stubs(:inhibit_warnings? => true) }
+            end
+
+            it 'adds the sandbox public headers search paths to the xcconfig, with quotes, as system headers' do
+              expected = "-isystem \"#{config.sandbox.public_headers.search_paths(Platform.ios).join('" -isystem "')}\""
+              @xcconfig.to_hash['OTHER_CFLAGS'].should.include expected
+            end
           end
 
-          it 'adds the dependent pods module map file to OTHER_CFLAGS' do
-            @pod_targets.each { |pt| pt.stubs(:defines_module? => true) }
-            @xcconfig = @generator.generate
-            expected = '$(inherited) -fmodule-map-file="${PODS_ROOT}/Headers/Private/BananaLib/BananaLib.modulemap" -isystem "${PODS_ROOT}/Headers/Public/BananaLib"'
-            @xcconfig.to_hash['OTHER_CFLAGS'].should == expected
-          end
+          describe 'with pod targets that define modules' do
+            def pod_target(spec, target_definition)
+              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition]).tap { |pt| pt.stubs(:defines_module? => true) }
+            end
 
-          it 'adds the dependent pods module map file to OTHER_SWIFT_FLAGS' do
-            @pod_targets.each { |pt| pt.stubs(:defines_module? => true) }
-            @xcconfig = @generator.generate
-            expected = '$(inherited) -D COCOAPODS -Xcc -fmodule-map-file="${PODS_ROOT}/Headers/Private/BananaLib/BananaLib.modulemap"'
-            @xcconfig.to_hash['OTHER_SWIFT_FLAGS'].should == expected
+            it 'adds the dependent pods module map file to OTHER_CFLAGS' do
+              @pod_targets.each { |pt| pt.stubs(:defines_module? => true) }
+              @xcconfig = @generator.generate
+              expected = '$(inherited) -fmodule-map-file="${PODS_ROOT}/Headers/Private/BananaLib/BananaLib.modulemap"'
+              @xcconfig.to_hash['OTHER_CFLAGS'].should == expected
+            end
+
+            it 'adds the dependent pods module map file to OTHER_SWIFT_FLAGS' do
+              @pod_targets.each { |pt| pt.stubs(:defines_module? => true) }
+              @xcconfig = @generator.generate
+              expected = '$(inherited) -D COCOAPODS -Xcc -fmodule-map-file="${PODS_ROOT}/Headers/Private/BananaLib/BananaLib.modulemap"'
+              @xcconfig.to_hash['OTHER_SWIFT_FLAGS'].should == expected
+            end
           end
 
           describe 'with a scoped pod target' do
@@ -183,13 +199,13 @@ module Pod
 
           it 'does not links the pod targets with the aggregate target for non-whitelisted configuration' do
             @generator = AggregateTargetSettings.new(@target, 'Debug')
-            @xcconfig = @generator.generate
-            @xcconfig.to_hash['OTHER_LDFLAGS'].should.not.include '-l"Pods-BananaLib"'
+            @xcconfig = @generator.dup.generate
+            @xcconfig.to_hash['OTHER_LDFLAGS'].should.be.nil
           end
 
           it 'does propagate framework or libraries from a non test specification to an aggregate target' do
             target_definition = stub('target_definition', :inheritance => 'complete', :abstract? => false, :podfile => Podfile.new, :platform => Platform.ios)
-            spec = stub('spec', :test_specification? => false)
+            spec = stub('spec', :library_specification? => true, :spec_type => :library)
             consumer = stub('consumer',
                             :libraries => ['xml2'],
                             :frameworks => ['XCTest'],
@@ -209,7 +225,12 @@ module Pod
             pod_target = stub('pod_target',
                               :file_accessors => [file_accessor],
                               :spec_consumers => [consumer],
-                              :requires_frameworks? => false,
+                              :build_as_framework? => false,
+                              :build_as_static_library? => true,
+                              :build_as_static? => true,
+                              :build_as_dynamic_library? => false,
+                              :build_as_dynamic_framework? => false,
+                              :build_as_static_framework? => false,
                               :dependent_targets => [],
                               :recursive_dependent_targets => [],
                               :sandbox => config.sandbox,
@@ -221,7 +242,7 @@ module Pod
                               :product_basename => 'PodTarget',
                               :target_definitions => [target_definition],
                              )
-            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target, false))
+            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
             aggregate_target = fixture_aggregate_target([pod_target])
             @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
             @generator.other_ldflags.should == %w(-ObjC -l"PodTarget" -l"StaticLibrary" -l"VendoredDyld" -l"xml2" -framework "StaticFramework" -framework "VendoredFramework" -framework "XCTest")
@@ -234,7 +255,7 @@ module Pod
           end
 
           before do
-            Target.any_instance.stubs(:requires_frameworks?).returns(true)
+            Target.any_instance.stubs(:build_type).returns(Target::BuildType.dynamic_framework)
           end
 
           behaves_like 'Aggregate'
@@ -260,17 +281,17 @@ module Pod
               @xcconfig.to_hash['OTHER_LDFLAGS'].should.include '-ObjC'
             end
 
-            it 'does not include framework header paths as local headers for pods that are linked statically' do
-              monkey_headers = '-iquote "${PODS_CONFIGURATION_BUILD_DIR}/monkey.framework/Headers"'
+            it 'does not include framework header paths in header search paths for pods that are linked statically' do
+              expected = '$(inherited) "${PODS_ROOT}/Headers/Public/monkey"'
               @xcconfig = @generator.generate
-              @xcconfig.to_hash['OTHER_CFLAGS'].should.not.include monkey_headers
+              @xcconfig.to_hash['HEADER_SEARCH_PATHS'].should == expected
             end
 
-            it 'includes the public header paths as system headers' do
-              expected = '$(inherited) -isystem "${PODS_ROOT}/Headers/Public/monkey" -iquote "${PODS_CONFIGURATION_BUILD_DIR}/OrangeFramework/OrangeFramework.framework/Headers"'
+            it 'includes the public header paths in header search paths' do
+              expected = '"${PODS_ROOT}/Headers/Public/monkey"'
               @generator.stubs(:pod_targets).returns([@pod_targets.first, pod_target(fixture_spec('orange-framework/OrangeFramework.podspec'), @target_definition)])
               @xcconfig = @generator.generate
-              @xcconfig.to_hash['OTHER_CFLAGS'].should == expected
+              @xcconfig.to_hash['HEADER_SEARCH_PATHS'].should.include expected
             end
 
             it 'includes the public header paths as user headers' do
@@ -286,7 +307,7 @@ module Pod
             end
 
             it 'includes default runpath search path list when not using frameworks but links a vendored dynamic framework' do
-              @target.stubs(:requires_frameworks?).returns(false)
+              @target.stubs(:build_type => Target::BuildType.static_library)
               @generator.generate.to_hash['LD_RUNPATH_SEARCH_PATHS'].should == "$(inherited) '@executable_path/Frameworks' '@loader_path/Frameworks'"
             end
           end
@@ -310,8 +331,8 @@ module Pod
             end
 
             it 'adds the framework header paths to the xcconfig, with quotes, as local headers' do
-              expected = '$(inherited) -iquote "${PODS_CONFIGURATION_BUILD_DIR}/BananaLib-iOS/BananaLib.framework/Headers" -iquote "${PODS_CONFIGURATION_BUILD_DIR}/OrangeFramework-iOS/OrangeFramework.framework/Headers"'
-              @xcconfig.to_hash['OTHER_CFLAGS'].should == expected
+              expected = '$(inherited) "${PODS_CONFIGURATION_BUILD_DIR}/BananaLib-iOS/BananaLib.framework/Headers" "${PODS_CONFIGURATION_BUILD_DIR}/OrangeFramework-iOS/OrangeFramework.framework/Headers"'
+              @xcconfig.to_hash['HEADER_SEARCH_PATHS'].should == expected
             end
           end
 
@@ -321,8 +342,22 @@ module Pod
             end
 
             it 'adds the framework header paths to the xcconfig, with quotes, as local headers' do
-              expected = '$(inherited) -iquote "${PODS_CONFIGURATION_BUILD_DIR}/OrangeFramework/OrangeFramework.framework/Headers"'
-              @xcconfig.to_hash['OTHER_CFLAGS'].should == expected
+              expected = '$(inherited) "${PODS_CONFIGURATION_BUILD_DIR}/OrangeFramework/OrangeFramework.framework/Headers"'
+              @xcconfig.to_hash['HEADER_SEARCH_PATHS'].should == expected
+            end
+          end
+
+          describe 'with a pod target inhibiting warnings' do
+            def pod_target(spec, target_definition)
+              fixture_pod_target(spec, false, {}, [], Platform.new(:ios, '6.0'), [target_definition]).tap { |pt| pt.stubs(:inhibit_warnings? => true) }
+            end
+
+            it 'adds the framework build path to the xcconfig, with quotes, as system framework search paths' do
+              @xcconfig.to_hash['OTHER_CFLAGS'].should.include '-iframework "${PODS_CONFIGURATION_BUILD_DIR}/OrangeFramework"'
+            end
+
+            it 'adds the framework header paths to the xcconfig, with quotes, as system headers' do
+              @xcconfig.to_hash['OTHER_CFLAGS'].should.include '-isystem "${PODS_CONFIGURATION_BUILD_DIR}/OrangeFramework/OrangeFramework.framework/Headers"'
             end
           end
 
@@ -360,7 +395,6 @@ module Pod
 
           it 'uses the target definition swift version' do
             @target_definition.stubs(:swift_version).returns('0.1')
-            @generator.send :__clear__
             @generator.send(:target_swift_version).should == Version.new('0.1')
           end
 
@@ -416,7 +450,7 @@ module Pod
 
           it 'does propagate framework or libraries from a non test specification to an aggregate target' do
             target_definition = stub('target_definition', :inheritance => 'complete', :abstract? => false, :podfile => Podfile.new, :platform => Platform.ios)
-            spec = stub('spec', :test_specification? => false)
+            spec = stub('spec', :library_specification? => true, :spec_type => :library)
             consumer = stub('consumer',
                             :libraries => ['xml2'],
                             :frameworks => ['XCTest'],
@@ -437,8 +471,12 @@ module Pod
             pod_target = stub('pod_target',
                               :file_accessors => [file_accessor],
                               :spec_consumers => [consumer],
-                              :requires_frameworks? => true,
-                              :static_framework? => false,
+                              :build_as_framework? => true,
+                              :build_as_static? => false,
+                              :build_as_static_library? => false,
+                              :build_as_static_framework? => false,
+                              :build_as_dynamic_library? => false,
+                              :build_as_dynamic_framework? => true,
                               :dependent_targets => [],
                               :recursive_dependent_targets => [],
                               :sandbox => config.sandbox,
@@ -450,15 +488,61 @@ module Pod
                               :product_basename => 'PodTarget',
                               :target_definitions => [target_definition],
                              )
-            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target, false))
+            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
             aggregate_target = fixture_aggregate_target([pod_target])
             @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
             @generator.other_ldflags.should == %w(-ObjC -l"StaticLibrary" -l"VendoredDyld" -l"xml2" -framework "PodTarget" -framework "VendoredFramework" -framework "XCTest")
           end
 
+          it 'does propagate system frameworks or system libraries from a non test specification to an aggregate target that uses static libraries' do
+            target_definition = stub('target_definition', :inheritance => 'complete', :abstract? => false, :podfile => Podfile.new, :platform => Platform.ios)
+            spec = stub('spec', :library_specification? => true, :spec_type => :library)
+            consumer = stub('consumer',
+                            :libraries => ['xml2'],
+                            :frameworks => ['XCTest'],
+                            :weak_frameworks => ['iAd'],
+                            :spec => spec,
+                           )
+            file_accessor = stub('file_accessor',
+                                 :spec => spec,
+                                 :spec_consumer => consumer,
+                                 :vendored_static_frameworks => [config.sandbox.root + 'StaticFramework.framework'],
+                                 :vendored_static_libraries => [config.sandbox.root + 'StaticLibrary.a'],
+                                 :vendored_dynamic_frameworks => [config.sandbox.root + 'VendoredFramework.framework'],
+                                 :vendored_dynamic_libraries => [config.sandbox.root + 'VendoredDyld.dyld'],
+                                )
+            file_accessor.stubs(:vendored_frameworks => file_accessor.vendored_static_frameworks + file_accessor.vendored_dynamic_frameworks,
+                                :vendored_dynamic_artifacts => file_accessor.vendored_dynamic_frameworks + file_accessor.vendored_dynamic_libraries,
+                                :vendored_static_artifacts => file_accessor.vendored_static_frameworks + file_accessor.vendored_static_libraries)
+            pod_target = stub('pod_target',
+                              :file_accessors => [file_accessor],
+                              :spec_consumers => [consumer],
+                              :build_as_framework? => false,
+                              :build_as_static_library? => true,
+                              :build_as_static_framework? => false,
+                              :build_as_dynamic_framework? => false,
+                              :build_as_dynamic_library? => false,
+                              :build_as_static? => true,
+                              :dependent_targets => [],
+                              :recursive_dependent_targets => [],
+                              :sandbox => config.sandbox,
+                              :should_build? => true,
+                              :configuration_build_dir => 'CBD',
+                              :include_in_build_config? => true,
+                              :uses_swift? => false,
+                              :build_product_path => 'BPP',
+                              :product_basename => 'PodTarget',
+                              :target_definitions => [target_definition],
+                             )
+            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
+            aggregate_target = fixture_aggregate_target([pod_target])
+            @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
+            @generator.other_ldflags.should == %w(-ObjC -l"PodTarget" -l"StaticLibrary" -l"VendoredDyld" -l"xml2" -framework "StaticFramework" -framework "VendoredFramework" -framework "XCTest" -weak_framework "iAd")
+          end
+
           it 'does propagate framework or libraries from a non test specification static framework to an aggregate target' do
             target_definition = stub('target_definition', :inheritance => 'complete', :abstract? => false, :podfile => Podfile.new, :platform => Platform.ios)
-            spec = stub('spec', :test_specification? => false)
+            spec = stub('spec', :library_specification? => true, :spec_type => :library)
             consumer = stub('consumer',
                             :libraries => ['xml2'],
                             :frameworks => ['XCTest'],
@@ -479,8 +563,12 @@ module Pod
             pod_target = stub('pod_target',
                               :file_accessors => [file_accessor],
                               :spec_consumers => [consumer],
-                              :requires_frameworks? => true,
-                              :static_framework? => true,
+                              :build_as_framework? => true,
+                              :build_as_static_framework? => true,
+                              :build_as_static? => true,
+                              :build_as_static_library? => false,
+                              :build_as_dynamic_library? => false,
+                              :build_as_dynamic_framework? => false,
                               :dependent_targets => [],
                               :recursive_dependent_targets => [],
                               :sandbox => config.sandbox,
@@ -492,7 +580,7 @@ module Pod
                               :product_basename => 'PodTarget',
                               :target_definitions => [target_definition],
                              )
-            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target, false))
+            pod_target.stubs(:build_settings => PodTargetSettings.new(pod_target))
             aggregate_target = fixture_aggregate_target([pod_target])
             @generator = AggregateTargetSettings.new(aggregate_target, 'Release')
             @generator.other_ldflags.should == %w(-ObjC -l"StaticLibrary" -l"VendoredDyld" -l"xml2" -framework "PodTarget" -framework "StaticFramework" -framework "VendoredFramework" -framework "XCTest")
@@ -504,7 +592,7 @@ module Pod
         describe 'serializing and deserializing' do
           before do
             @path = temporary_directory + 'sample.xcconfig'
-            @generator.save_as(@path)
+            @generator.dup.save_as(@path)
           end
 
           it 'saves the xcconfig' do
@@ -521,12 +609,8 @@ module Pod
             @xcconfig = @generator.generate
           end
 
-          it 'does not link with vendored frameworks' do
-            @xcconfig.to_hash['OTHER_LDFLAGS'].should.not.include '-framework "Bananalib"'
-          end
-
-          it 'does not link with vendored libraries' do
-            @xcconfig.to_hash['OTHER_LDFLAGS'].should.not.include '-l"Bananalib"'
+          it 'does not link with vendored frameworks or libraries' do
+            @xcconfig.to_hash['OTHER_LDFLAGS'].should.be.nil
           end
         end
 
@@ -587,7 +671,9 @@ module Pod
 
             it 'adds values from all subspecs' do
               @consumer_b.stubs(:user_target_xcconfig).returns('OTHER_CPLUSPLUSFLAGS' => '-std=c++1y')
-              consumer_c = mock('consumer_c', :user_target_xcconfig => { 'OTHER_CPLUSPLUSFLAGS' => '-stdlib=libc++' }, :script_phases => [], :spec => mock(:test_specification? => false), :frameworks => [], :libraries => [])
+              consumer_c = mock('consumer_c', :user_target_xcconfig => { 'OTHER_CPLUSPLUSFLAGS' => '-stdlib=libc++' },
+                                              :spec => mock(:spec_type => :library), :frameworks => [],
+                                              :libraries => [], :weak_frameworks => [])
               @pod_targets[1].stubs(:spec_consumers).returns([@consumer_b, consumer_c])
               @xcconfig = @generator.generate
               @xcconfig.to_hash['OTHER_CPLUSPLUSFLAGS'].should == '-std=c++1y -stdlib=libc++'
@@ -640,7 +726,7 @@ module Pod
               @target.pod_targets.each { |pt| pt.spec_consumers.each { |sc| sc.stubs(:frameworks => %w(UIKit), :libraries => %w(z c++)) } }
 
               @xcconfig = @generator.generate
-              @xcconfig.to_hash['OTHER_LDFLAGS'].should == '$(inherited) -ObjC -l"c++" -l"z" -framework "UIKit"'
+              @xcconfig.to_hash['OTHER_LDFLAGS'].should == '$(inherited) -l"c++" -l"z" -framework "UIKit"'
             end
 
             it 'should not doubly link static libraries' do
@@ -650,7 +736,7 @@ module Pod
 
               @xcconfig = @generator.generate
               # -lBananaLib is not added
-              @xcconfig.to_hash['OTHER_LDFLAGS'].should == '$(inherited) -ObjC -l"z" -framework "UIKit"'
+              @xcconfig.to_hash['OTHER_LDFLAGS'].should == '$(inherited) -l"z" -framework "UIKit"'
             end
           end
         end

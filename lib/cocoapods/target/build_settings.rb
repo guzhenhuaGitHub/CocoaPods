@@ -102,7 +102,6 @@ module Pod
 
         define_method(method_name) do
           if memoized
-            @__memoized ||= {}
             retval = @__memoized.fetch(memoized_key, :not_found)
             return retval if :not_found != retval
           end
@@ -157,6 +156,12 @@ module Pod
       #
       def initialize(target)
         @target = target
+        @__memoized = {}
+      end
+
+      def initialize_copy(other)
+        super
+        @__memoized = {}
       end
 
       # @return [Xcodeproj::Config]
@@ -165,15 +170,7 @@ module Pod
         Xcodeproj::Config.new(settings)
       end
 
-      # @return [Xcodeproj::Config]
-      #
-      # @!visibility private
-      # @see #__clear__
-      # @see #xcconfig
-      def generate
-        __clear__
-        xcconfig
-      end
+      alias generate xcconfig
 
       # Saves the generated xcconfig to the given path
       #
@@ -208,7 +205,7 @@ module Pod
 
       # @return [String]
       define_build_settings_method :code_sign_identity, :build_setting => true do
-        return unless target.requires_frameworks?
+        return unless target.build_as_dynamic?
         return unless target.platform.to_sym == :osx
         ''
       end
@@ -346,13 +343,6 @@ module Pod
 
       # @!group Private Methods
 
-      # Clears all memoized settings.
-      # @!visibility private
-      # @return [Void]
-      def __clear__
-        @__memoized = nil
-      end
-
       private
 
       # @return [Hash<String => String|Array<String>>]
@@ -437,17 +427,19 @@ module Pod
       # Filters out pod targets whose `specs` are a subset of
       # another target's.
       #
-      # @param [Array<PodTarget>] dependent_targets
+      # @param [Array<PodTarget>] pod_targets
       #
       # @return [Array<PodTarget>]
       #
       def select_maximal_pod_targets(pod_targets)
         subset_targets = []
-        pod_targets.uniq.combination(2) do |a, b|
-          if (a.specs - b.specs).empty?
-            subset_targets << a
-          elsif (b.specs - a.specs).empty?
-            subset_targets << b
+        pod_targets.uniq.group_by(&:pod_name).each do |_pod_name, targets|
+          targets.combination(2) do |a, b|
+            if (a.specs - b.specs).empty?
+              subset_targets << a
+            elsif (b.specs - a.specs).empty?
+              subset_targets << b
+            end
           end
         end
         pod_targets - subset_targets
@@ -470,26 +462,43 @@ module Pod
         attr_reader :test_xcconfig
         alias test_xcconfig? test_xcconfig
 
-        # Intializes a new instance
+        attr_reader :app_xcconfig
+        alias app_xcconfig? app_xcconfig
+
+        attr_reader :library_xcconfig
+        alias library_xcconfig? library_xcconfig
+
+        # @return [Specification]
+        #   The non-library specification these build settings are for or `nil`.
+        #
+        attr_reader :non_library_spec
+
+        # Initializes a new instance
         #
         # @param [PodTarget] target
         #   see {#target}
         #
-        # @param [String] configuration_name
-        #   see {#configuration_name}
+        # @param [Specification] non_library_spec
+        #  see {#non_library_spec}
         #
-        # @param [Boolean] test_xcconfig
-        #  see {#test_xcconfig?}
-        #
-        def initialize(target, test_xcconfig)
+        def initialize(target, non_library_spec = nil)
           super(target)
-          @test_xcconfig = test_xcconfig
+          if @non_library_spec = non_library_spec
+            @test_xcconfig = non_library_spec.test_specification?
+            @app_xcconfig = non_library_spec.app_specification?
+            @xcconfig_spec_type = non_library_spec.spec_type
+            @library_xcconfig = false
+          else
+            @test_xcconfig = @app_xcconfig = false
+            @xcconfig_spec_type = :library
+            @library_xcconfig = true
+          end
         end
 
         # @return [Xcodeproj::Xconfig]
         define_build_settings_method :xcconfig, :memoized => true do
           xcconfig = super()
-          xcconfig.merge(pod_target_xcconfig)
+          xcconfig.merge(merged_pod_target_xcconfigs)
         end
 
         #-------------------------------------------------------------------------#
@@ -517,35 +526,35 @@ module Pod
 
         # @return [Array<String>]
         define_build_settings_method :frameworks, :memoized => true, :sorted => true, :uniqued => true do
-          return [] if (!target.requires_frameworks? || target.static_framework?) && !test_xcconfig?
+          return [] if target.build_as_static? && library_xcconfig?
 
           frameworks = vendored_dynamic_frameworks.map { |l| File.basename(l, '.framework') }
-          frameworks.concat vendored_static_frameworks.map { |l| File.basename(l, '.framework') } unless test_xcconfig?
+          frameworks.concat vendored_static_frameworks.map { |l| File.basename(l, '.framework') } if library_xcconfig?
           frameworks.concat consumer_frameworks
           frameworks.concat dependent_targets.flat_map { |pt| pt.build_settings.dynamic_frameworks_to_import }
-          frameworks.concat dependent_targets.flat_map { |pt| pt.build_settings.static_frameworks_to_import } if test_xcconfig?
+          frameworks.concat dependent_targets.flat_map { |pt| pt.build_settings.static_frameworks_to_import } unless library_xcconfig?
           frameworks
         end
 
         # @return [Array<String>]
         define_build_settings_method :static_frameworks_to_import, :memoized => true do
           static_frameworks_to_import = []
-          static_frameworks_to_import.concat vendored_static_frameworks.map { |f| File.basename(f, '.framework') } unless target.should_build? && target.requires_frameworks? && !target.static_framework?
-          static_frameworks_to_import << target.product_basename if target.should_build? && target.requires_frameworks? && target.static_framework?
+          static_frameworks_to_import.concat vendored_static_frameworks.map { |f| File.basename(f, '.framework') } unless target.should_build? && target.build_as_dynamic_framework?
+          static_frameworks_to_import << target.product_basename if target.should_build? && target.build_as_static_framework?
           static_frameworks_to_import
         end
 
         # @return [Array<String>]
         define_build_settings_method :dynamic_frameworks_to_import, :memoized => true do
           dynamic_frameworks_to_import = vendored_dynamic_frameworks.map { |f| File.basename(f, '.framework') }
-          dynamic_frameworks_to_import << target.product_basename if target.should_build? && target.requires_frameworks? && !target.static_framework?
+          dynamic_frameworks_to_import << target.product_basename if target.should_build? && target.build_as_dynamic_framework?
           dynamic_frameworks_to_import.concat consumer_frameworks
           dynamic_frameworks_to_import
         end
 
         # @return [Array<String>]
         define_build_settings_method :weak_frameworks, :memoized => true do
-          return [] if (!target.requires_frameworks? || target.static_framework?) && !test_xcconfig?
+          return [] if target.build_as_static? && library_xcconfig?
 
           weak_frameworks = spec_consumers.flat_map(&:weak_frameworks)
           weak_frameworks.concat dependent_targets.flat_map { |pt| pt.build_settings.weak_frameworks_to_import }
@@ -559,7 +568,7 @@ module Pod
 
         # @return [Array<String>]
         define_build_settings_method :weak_frameworks_to_import, :memoized => true, :sorted => true, :uniqued => true do
-          []
+          spec_consumers.flat_map(&:weak_frameworks)
         end
 
         # @return [Array<String>]
@@ -567,8 +576,14 @@ module Pod
           paths = super().dup
           paths.concat dependent_targets.flat_map { |t| t.build_settings.framework_search_paths_to_import }
           paths.concat framework_search_paths_to_import
-          paths.delete(target.configuration_build_dir(CONFIGURATION_BUILD_DIR_VARIABLE)) unless test_xcconfig?
+          paths.delete(target.configuration_build_dir(CONFIGURATION_BUILD_DIR_VARIABLE)) if library_xcconfig?
           paths
+        end
+
+        # @return [String]
+        define_build_settings_method :framework_header_search_path, :memoized => true do
+          return unless target.build_as_framework?
+          "#{target.build_product_path}/Headers"
         end
 
         # @return [Array<String>]
@@ -580,7 +595,7 @@ module Pod
         define_build_settings_method :framework_search_paths_to_import, :memoized => true do
           paths = framework_search_paths_to_import_developer_frameworks(consumer_frameworks)
           paths.concat vendored_framework_search_paths
-          return paths unless target.requires_frameworks? && target.should_build?
+          return paths unless target.build_as_framework? && target.should_build?
 
           paths + [target.configuration_build_dir(CONFIGURATION_BUILD_DIR_VARIABLE)]
         end
@@ -601,26 +616,27 @@ module Pod
 
         # @return [Array<String>]
         define_build_settings_method :libraries, :memoized => true, :sorted => true, :uniqued => true do
-          return [] if (!target.requires_frameworks? || target.static_framework?) && !test_xcconfig?
+          return [] if library_xcconfig? && target.build_as_static?
 
-          libraries = vendored_dynamic_libraries.map { |l| File.basename(l, l.extname).sub(/\Alib/, '') }
-          libraries.concat spec_consumers.flat_map(&:libraries)
+          libraries = libraries_to_import.dup
           libraries.concat dependent_targets.flat_map { |pt| pt.build_settings.dynamic_libraries_to_import }
-          libraries.concat dependent_targets.flat_map { |pt| pt.build_settings.static_libraries_to_import } if test_xcconfig?
+          libraries.concat dependent_targets.flat_map { |pt| pt.build_settings.static_libraries_to_import } unless library_xcconfig?
           libraries
         end
 
         # @return [Array<String>]
         define_build_settings_method :static_libraries_to_import, :memoized => true do
           static_libraries_to_import = vendored_static_libraries.map { |l| File.basename(l, l.extname).sub(/\Alib/, '') }
-          static_libraries_to_import << target.product_basename if target.should_build? && !target.requires_frameworks?
+          static_libraries_to_import << target.product_basename if target.should_build? && target.build_as_static_library?
           static_libraries_to_import
         end
 
         # @return [Array<String>]
         define_build_settings_method :dynamic_libraries_to_import, :memoized => true do
-          vendored_dynamic_libraries.map { |l| File.basename(l, l.extname).sub(/\Alib/, '') } +
-          spec_consumers.flat_map(&:libraries)
+          dynamic_libraries_to_import = vendored_dynamic_libraries.map { |l| File.basename(l, l.extname).sub(/\Alib/, '') }
+          dynamic_libraries_to_import.concat spec_consumers.flat_map(&:libraries)
+          dynamic_libraries_to_import << target.product_basename if target.should_build? && target.build_as_dynamic_library?
+          dynamic_libraries_to_import
         end
 
         # @return [Array<String>]
@@ -630,12 +646,14 @@ module Pod
 
         # @return [Array<String>]
         define_build_settings_method :library_search_paths, :build_setting => true, :memoized => true, :sorted => true, :uniqued => true do
-          vendored = vendored_dynamic_library_search_paths.dup
+          return [] if library_xcconfig? && target.build_as_static?
+
+          vendored = library_search_paths_to_import.dup
           vendored.concat dependent_targets.flat_map { |t| t.build_settings.vendored_dynamic_library_search_paths }
-          if test_xcconfig?
-            vendored.concat dependent_targets.flat_map { |t| t.build_settings.library_search_paths_to_import }
-          else
+          if library_xcconfig?
             vendored.delete(target.configuration_build_dir(CONFIGURATION_BUILD_DIR_VARIABLE))
+          else
+            vendored.concat(dependent_targets.flat_map { |t| t.build_settings.library_search_paths_to_import })
           end
           vendored
         end
@@ -663,7 +681,7 @@ module Pod
         # @return [Array<String>]
         define_build_settings_method :library_search_paths_to_import, :memoized => true do
           vendored_library_search_paths = vendored_static_library_search_paths + vendored_dynamic_library_search_paths
-          return vendored_library_search_paths if target.requires_frameworks? || !target.should_build?
+          return vendored_library_search_paths if target.build_as_framework? || !target.should_build?
 
           vendored_library_search_paths << target.configuration_build_dir(CONFIGURATION_BUILD_DIR_VARIABLE)
         end
@@ -680,7 +698,7 @@ module Pod
         # @return [Array<String>]
         define_build_settings_method :module_map_file_to_import, :memoized => true do
           return unless target.should_build?
-          return if target.requires_frameworks?
+          return if target.build_as_framework? # framework module maps are automatically discovered
           return unless target.defines_module?
 
           if target.uses_swift?
@@ -693,19 +711,32 @@ module Pod
 
         # @return [Array<String>]
         define_build_settings_method :header_search_paths, :build_setting => true, :memoized => true, :sorted => true do
-          target.header_search_paths(test_xcconfig?)
+          target.header_search_paths(:include_dependent_targets_for_test_spec => test_xcconfig? && non_library_spec, :include_dependent_targets_for_app_spec => app_xcconfig? && non_library_spec)
+        end
+
+        # @return [Array<String>]
+        define_build_settings_method :public_header_search_paths, :memoized => true, :sorted => true do
+          target.header_search_paths(:include_dependent_targets_for_test_spec => test_xcconfig? && non_library_spec, :include_dependent_targets_for_app_spec => app_xcconfig? && non_library_spec, :include_private_headers => false)
         end
 
         #-------------------------------------------------------------------------#
 
         # @!group Swift
 
+        # @see BuildSettings#other_swift_flags_without_swift?
+        def other_swift_flags_without_swift?
+          return false if library_xcconfig?
+
+          target.uses_swift_for_non_library_spec?(non_library_spec)
+        end
+
         # @return [Array<String>]
         define_build_settings_method :other_swift_flags, :build_setting => true, :memoized => true do
-          return unless target.uses_swift?
+          return unless target.uses_swift? || other_swift_flags_without_swift?
+
           flags = super()
-          flags << '-suppress-warnings' if target.inhibit_warnings?
-          if !target.requires_frameworks? && target.defines_module? && !test_xcconfig?
+          flags << '-suppress-warnings' if target.inhibit_warnings? && library_xcconfig?
+          if !target.build_as_framework? && target.defines_module? && library_xcconfig?
             flags.concat %w( -import-underlying-module -Xcc -fmodule-map-file=${SRCROOT}/${MODULEMAP_FILE} )
           end
           flags
@@ -714,13 +745,13 @@ module Pod
         # @return [Array<String>]
         define_build_settings_method :swift_include_paths, :build_setting => true, :memoized => true, :sorted => true, :uniqued => true do
           paths = dependent_targets.flat_map { |t| t.build_settings.swift_include_paths_to_import }
-          paths.concat swift_include_paths_to_import if test_xcconfig?
+          paths.concat swift_include_paths_to_import unless library_xcconfig?
           paths
         end
 
         # @return [Array<String>]
         define_build_settings_method :swift_include_paths_to_import, :memoized => true do
-          return [] unless target.uses_swift? && !target.requires_frameworks?
+          return [] unless target.uses_swift? && !target.build_as_framework?
 
           [target.configuration_build_dir(CONFIGURATION_BUILD_DIR_VARIABLE)]
         end
@@ -734,20 +765,20 @@ module Pod
         # @note this is only true when generating build settings for a test bundle
         #
         def requires_objc_linker_flag?
-          test_xcconfig?
+          test_xcconfig? || app_xcconfig?
         end
 
         # @return [Boolean] whether the `-fobjc-arc` linker flag is required.
         #
         define_build_settings_method :requires_fobjc_arc?, :memoized => true do
           target.podfile.set_arc_compatibility_flag? &&
-          file_accessors.any? { |fa| fa.spec_consumer.requires_arc? }
+            file_accessors.any? { |fa| fa.spec_consumer.requires_arc? }
         end
 
         # @return [Array<String>]
         define_build_settings_method :ld_runpath_search_paths, :build_setting => true, :memoized => true do
-          return unless test_xcconfig?
-          _ld_runpath_search_paths(:test_bundle => true)
+          return if library_xcconfig?
+          _ld_runpath_search_paths(:test_bundle => test_xcconfig?)
         end
 
         #-------------------------------------------------------------------------#
@@ -766,7 +797,7 @@ module Pod
 
         # @return [String]
         define_build_settings_method :configuration_build_dir, :build_setting => true, :memoized => true do
-          return if test_xcconfig?
+          return unless library_xcconfig?
           target.configuration_build_dir(CONFIGURATION_BUILD_DIR_VARIABLE)
         end
 
@@ -778,22 +809,13 @@ module Pod
         define_build_settings_method :dependent_targets, :memoized => true do
           select_maximal_pod_targets(
             if test_xcconfig?
-              target.all_dependent_targets
+              target.dependent_targets_for_test_spec(non_library_spec)
+            elsif app_xcconfig?
+              target.dependent_targets_for_app_spec(non_library_spec)
             else
               target.recursive_dependent_targets
             end,
           )
-        end
-
-        # @return [Hash<String => String>]
-        define_build_settings_method :pod_target_xcconfig, :memoized => true do
-          config = {}
-
-          spec_consumers.each do |consumer|
-            config.update(consumer.pod_target_xcconfig) # TODO: resolve conflicts
-          end
-
-          config
         end
 
         # Returns the +pod_target_xcconfig+ for the pod target and its spec
@@ -803,7 +825,7 @@ module Pod
         #
         def pod_target_xcconfig_values_by_consumer_by_key
           spec_consumers.each_with_object({}) do |spec_consumer, hash|
-            spec_consumer.user_target_xcconfig.each do |k, v|
+            spec_consumer.pod_target_xcconfig.each do |k, v|
               (hash[k] ||= {})[spec_consumer] = v
             end
           end
@@ -820,22 +842,15 @@ module Pod
 
         # @return [Array<Sandbox::FileAccessor>]
         define_build_settings_method :file_accessors, :memoized => true do
-          target.file_accessors.select { |fa| fa.spec.test_specification? == test_xcconfig? }
+          target.file_accessors.select { |fa| fa.spec.spec_type == @xcconfig_spec_type }
         end
 
         # @return [Array<Specification::Consumer>]
         define_build_settings_method :spec_consumers, :memoized => true do
-          target.spec_consumers.select { |c| c.spec.test_specification? == test_xcconfig? }
+          target.spec_consumers.select { |fa| fa.spec.spec_type == @xcconfig_spec_type }
         end
 
         #-------------------------------------------------------------------------#
-
-        # @!group Private Methods
-
-        def __clear__
-          super
-          dependent_targets.each { |pt| pt.build_settings.__clear__ }
-        end
       end
 
       # A subclass that generates build settings for a `PodTarget`
@@ -927,9 +942,15 @@ module Pod
         define_build_settings_method :header_search_paths, :build_setting => true, :memoized => true, :sorted => true, :uniqued => true do
           paths = []
 
-          if !target.requires_frameworks? || !pod_targets.all?(&:should_build?)
+          if !target.build_as_framework? || !pod_targets.all?(&:should_build?)
             paths.concat target.sandbox.public_headers.search_paths(target.platform)
           end
+
+          # Make frameworks headers discoverable with any syntax (quotes,
+          # brackets, @import, etc.)
+          paths.concat pod_targets.
+            select { |pt| pt.build_as_framework? && pt.should_build? }.
+            map { |pt| pt.build_settings.framework_header_search_path }
 
           paths.concat target.search_paths_aggregate_targets.flat_map { |at| at.build_settings(configuration_name).header_search_paths }
 
@@ -939,18 +960,24 @@ module Pod
         # @return [Array<String>]
         define_build_settings_method :other_cflags, :build_setting => true, :memoized => true do
           flags = super()
-          flags +
-            header_search_paths.flat_map { |p| ['-isystem', p] } +
-            framework_header_paths_for_iquote.flat_map { |p| ['-iquote', p] }
-        end
 
-        # @return [Array<String>]
-        define_build_settings_method :framework_header_paths_for_iquote, :memoized => true, :sorted => true, :uniqued => true do
-          paths = pod_targets.
-                    select { |pt| pt.should_build? && pt.requires_frameworks? }.
-                    map { |pt| "#{pt.build_product_path}/Headers" }
-          paths.concat target.search_paths_aggregate_targets.flat_map { |at| at.build_settings(configuration_name).framework_header_paths_for_iquote }
-          paths
+          pod_targets_inhibiting_warnings = pod_targets.select(&:inhibit_warnings?)
+
+          silenced_headers = []
+          silenced_frameworks = []
+          pod_targets_inhibiting_warnings.each do |pt|
+            if pt.build_as_framework? && pt.should_build?
+              silenced_headers.append pt.build_settings.framework_header_search_path
+            else
+              silenced_headers.concat pt.build_settings.public_header_search_paths
+            end
+            silenced_frameworks.concat pt.build_settings.framework_search_paths_to_import
+          end
+
+          flags += silenced_headers.uniq.flat_map { |p| ['-isystem', p] }
+          flags += silenced_frameworks.uniq.flat_map { |p| ['-iframework', p] }
+
+          flags
         end
 
         # @return [Array<String>]
@@ -999,7 +1026,7 @@ module Pod
 
         # @return [Array<String>]
         define_build_settings_method :ld_runpath_search_paths, :build_setting => true, :memoized => true, :uniqued => true do
-          return unless target.requires_frameworks? || any_vendored_dynamic_artifacts?
+          return unless pod_targets.any?(&:build_as_dynamic?) || any_vendored_dynamic_artifacts?
           symbol_type = target.user_targets.map(&:symbol_type).uniq.first
           test_bundle = symbol_type == :octest_bundle || symbol_type == :unit_test_bundle || symbol_type == :ui_test_bundle
           _ld_runpath_search_paths(:requires_host_target => target.requires_host_target?, :test_bundle => test_bundle)
@@ -1009,15 +1036,24 @@ module Pod
         define_build_settings_method :any_vendored_dynamic_artifacts?, :memoized => true do
           pod_targets.any? do |pt|
             pt.file_accessors.any? do |fa|
-              fa.vendored_dynamic_artifacts.any?
+              !fa.vendored_dynamic_artifacts.empty?
+            end
+          end
+        end
+
+        # @return [Boolean]
+        define_build_settings_method :any_vendored_static_artifacts?, :memoized => true do
+          pod_targets.any? do |pt|
+            pt.file_accessors.any? do |fa|
+              !fa.vendored_static_artifacts.empty?
             end
           end
         end
 
         # @return [Boolean]
         define_build_settings_method :requires_objc_linker_flag?, :memoized => true do
-          includes_static_libs = !target.requires_frameworks?
-          includes_static_libs || pod_targets.flat_map(&:file_accessors).any? { |fa| !fa.vendored_static_artifacts.empty? }
+          pod_targets.any?(&:build_as_static?) ||
+            any_vendored_static_artifacts?
         end
 
         # @return [Boolean]
@@ -1072,6 +1108,11 @@ module Pod
           pod_targets.each_with_object({}) do |target, hash|
             target.spec_consumers.each do |spec_consumer|
               spec_consumer.user_target_xcconfig.each do |k, v|
+                # TODO: Need to decide how we are going to ensure settings like these
+                # are always excluded from the user's project.
+                #
+                # See https://github.com/CocoaPods/CocoaPods/issues/1216
+                next if k == 'USE_HEADERMAP'
                 (hash[k] ||= {})[spec_consumer] = v
               end
             end
@@ -1088,14 +1129,6 @@ module Pod
         end
 
         #-------------------------------------------------------------------------#
-
-        # @!group Private Methods
-
-        def __clear__
-          super
-          pod_targets.each { |pt| pt.build_settings.__clear__ }
-          target.search_paths_aggregate_targets.each { |at| at.build_settings(configuration_name).__clear__ }
-        end
       end
     end
   end

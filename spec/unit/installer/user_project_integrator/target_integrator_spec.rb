@@ -17,12 +17,13 @@ module Pod
         user_build_configurations = { 'Release' => :release, 'Debug' => :debug }
         @pod_bundle = AggregateTarget.new(config.sandbox, false, user_build_configurations, [], Platform.ios, target_definition, project_path.dirname, @project, [@target.uuid], {})
         @pod_bundle.stubs(:resource_paths_by_config).returns('Release' => %w(${PODS_ROOT}/Lib/Resources/image.png))
-        @pod_bundle.stubs(:framework_paths_by_config).returns('Release' => [{ :input_path => '${PODS_BUILD_DIR}/Lib/Lib.framework' }])
+        @pod_bundle.stubs(:framework_paths_by_config).returns('Release' => [Target::FrameworkPaths.new('${PODS_BUILD_DIR}/Lib/Lib.framework')])
         configuration = Xcodeproj::Config.new(
           'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) COCOAPODS=1',
         )
         @pod_bundle.xcconfigs['Debug'] = configuration
         @pod_bundle.xcconfigs['Release'] = configuration
+
         @target_integrator = TargetIntegrator.new(@pod_bundle)
         @target_integrator.private_methods.grep(/^update_to_cocoapods_/).each do |method|
           @target_integrator.stubs(method)
@@ -49,16 +50,6 @@ module Pod
           @target_integrator.integrate!
         end
 
-        it 'fixes the copy resource scripts of legacy installations' do
-          @target_integrator.integrate!
-          target = @target_integrator.send(:native_targets).first
-          phase_name = @copy_pods_resources_phase_name
-          phase = target.shell_script_build_phases.find { |bp| bp.name == phase_name }
-          phase.shell_script = %("${SRCROOT}/../Pods/Pods-resources.sh"\n)
-          @target_integrator.integrate!
-          phase.shell_script.strip.should == '"${SRCROOT}/../Pods/Target Support Files/Pods/Pods-resources.sh"'
-        end
-
         it 'adds references to the Pods static libraries to the Frameworks group' do
           @target_integrator.integrate!
           @target_integrator.send(:user_project)['Frameworks/libPods.a'].should.not.be.nil
@@ -73,13 +64,13 @@ module Pod
         end
 
         it 'adds references to the Pods static framework to the Frameworks group' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           @target_integrator.send(:user_project)['Frameworks/Pods.framework'].should.not.be.nil
         end
 
         it 'adds the Pods static framework to the "Link binary with libraries" build phase of each target' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           target = @target_integrator.send(:native_targets).first
           phase = target.frameworks_build_phase
@@ -92,7 +83,7 @@ module Pod
           target = @target_integrator.send(:native_targets).first
           phase_name = @copy_pods_resources_phase_name
           phase = target.shell_script_build_phases.find { |bp| bp.name == phase_name }
-          phase.shell_script.strip.should == '"${SRCROOT}/../Pods/Target Support Files/Pods/Pods-resources.sh"'
+          phase.shell_script.strip.should == '"${PODS_ROOT}/Target Support Files/Pods/Pods-resources.sh"'
         end
 
         it 'adds a Check Manifest.lock build phase to each target' do
@@ -131,7 +122,7 @@ module Pod
         end
 
         it 'adds an embed frameworks build phase if frameworks are used' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           target = @target_integrator.send(:native_targets).first
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
@@ -146,7 +137,7 @@ module Pod
         end
 
         it 'adds an embed frameworks build phase if the target to integrate is a messages application' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           target = @target_integrator.send(:native_targets).first
           target.stubs(:symbol_type).returns(:messages_application)
           @target_integrator.integrate!
@@ -155,7 +146,7 @@ module Pod
         end
 
         it 'does not add an embed frameworks build phase if the target to integrate is a framework' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           target = @target_integrator.send(:native_targets).first
           target.stubs(:symbol_type).returns(:framework)
           @target_integrator.integrate!
@@ -164,7 +155,7 @@ module Pod
         end
 
         it 'does not add an embed frameworks build phase if the target to integrate is an app extension' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           target = @target_integrator.send(:native_targets).first
           target.stubs(:symbol_type).returns(:app_extension)
           @target_integrator.integrate!
@@ -173,7 +164,7 @@ module Pod
         end
 
         it 'does not add an embed frameworks build phase if the target to integrate is a watch extension' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           target = @target_integrator.send(:native_targets).first
           target.stubs(:symbol_type).returns(:watch_extension)
           @target_integrator.integrate!
@@ -182,7 +173,7 @@ module Pod
         end
 
         it 'adds an embed frameworks build phase if the target to integrate is a watchOS 2 extension' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           target = @target_integrator.send(:native_targets).first
           target.stubs(:symbol_type).returns(:watch2_extension)
           @target_integrator.integrate!
@@ -191,7 +182,7 @@ module Pod
         end
 
         it 'does not add an embed frameworks build phase if the target to integrate is a messages extension' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           target = @target_integrator.send(:native_targets).first
           target.stubs(:symbol_type).returns(:messages_extension)
           @target_integrator.integrate!
@@ -200,7 +191,7 @@ module Pod
         end
 
         it 'adds an embed frameworks build phase if the target to integrate is a UI Test bundle' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           target = @target_integrator.send(:native_targets).first
           target.stubs(:symbol_type).returns(:ui_test_bundle)
           @target_integrator.integrate!
@@ -209,7 +200,7 @@ module Pod
         end
 
         it 'does not remove existing embed frameworks build phases from integrated framework targets' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           @pod_bundle.stubs(:requires_frameworks? => false)
           target = @target_integrator.send(:native_targets).first
@@ -219,7 +210,7 @@ module Pod
         end
 
         it 'does not remove existing embed frameworks build phases if frameworks are not used anymore' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           @pod_bundle.stubs(:requires_frameworks? => false)
           @target_integrator.integrate!
@@ -229,7 +220,7 @@ module Pod
         end
 
         it 'removes embed frameworks build phases from app extension targets' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           target = @target_integrator.send(:native_targets).first
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
@@ -241,7 +232,7 @@ module Pod
         end
 
         it 'removes embed frameworks build phases from watch extension targets' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           target = @target_integrator.send(:native_targets).first
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
@@ -253,7 +244,7 @@ module Pod
         end
 
         it 'removes embed frameworks build phases from messages extension targets that are used in an iOS app' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           target = @target_integrator.send(:native_targets).first
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
@@ -265,7 +256,7 @@ module Pod
         end
 
         it 'does not remove embed frameworks build phases from messages extension targets that are used in a messages app' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           target = @target_integrator.send(:native_targets).first
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
@@ -278,7 +269,7 @@ module Pod
         end
 
         it 'removes embed frameworks build phases from framework targets' do
-          @pod_bundle.stubs(:requires_frameworks? => true)
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target_integrator.integrate!
           target = @target_integrator.send(:native_targets).first
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
@@ -303,7 +294,7 @@ module Pod
           phase = target.shell_script_build_phases.find { |bp| bp.name == @copy_pods_resources_phase_name }
           phase.input_paths.sort.should == %w(
             ${PODS_ROOT}/Lib/Resources/image.png
-            ${SRCROOT}/../Pods/Target\ Support\ Files/Pods/Pods-resources.sh
+            ${PODS_ROOT}/Target\ Support\ Files/Pods/Pods-resources.sh
           )
           # Now pretend the same target has no more framework paths, it should update the targets input/output paths
           @pod_bundle.stubs(:resource_paths_by_config => {})
@@ -319,8 +310,8 @@ module Pod
             "${PODS_CONFIGURATION_BUILD_DIR}/DebugLib/DebugLibPng#{i}.png"
           end
           resource_paths_by_config = {
-            'Debug' => [paths],
-            'Release' => [paths],
+            'Debug' => paths,
+            'Release' => paths,
           }
           @pod_bundle.stubs(:resource_paths_by_config => resource_paths_by_config)
           @target_integrator.integrate!
@@ -358,7 +349,7 @@ module Pod
             ${PODS_CONFIGURATION_BUILD_DIR}/ReleaseLib/ReleaseLib.bundle
             ${PODS_CONFIGURATION_BUILD_DIR}/ReleaseLib/ReleaseLib.storyboard
             ${PODS_CONFIGURATION_BUILD_DIR}/ReleaseLib/ReleaseLibXIB.xib
-            ${SRCROOT}/../Pods/Target\ Support\ Files/Pods/Pods-resources.sh
+            ${PODS_ROOT}/Target\ Support\ Files/Pods/Pods-resources.sh
           )
           phase.output_paths.sort.should == %w(
             ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Assets.car
@@ -388,7 +379,7 @@ module Pod
           phase.input_paths.sort.should == %w(
             ${PODS_CONFIGURATION_BUILD_DIR}/DebugLib/SomeBundle.bundle
             ${PODS_CONFIGURATION_BUILD_DIR}/ReleaseLib/SomeBundle.bundle
-            ${SRCROOT}/../Pods/Target\ Support\ Files/Pods/Pods-resources.sh
+            ${PODS_ROOT}/Target\ Support\ Files/Pods/Pods-resources.sh
           )
           phase.output_paths.sort.should == %w(
             ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/SomeBundle.bundle
@@ -404,9 +395,7 @@ module Pod
         end
 
         it 'removes embed frameworks phase if it becomes empty' do
-          debug_non_vendored_framework = { :name => 'DebugCompiledFramework.framework',
-                                           :input_path => '${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/DebugCompiledFramework.framework',
-                                           :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/DebugCompiledFramework.framework' }
+          debug_non_vendored_framework = Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/DebugCompiledFramework.framework')
           framework_paths_by_config = {
             'Debug' => [debug_non_vendored_framework],
           }
@@ -416,7 +405,7 @@ module Pod
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
           phase.input_paths.sort.should == %w(
             ${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/DebugCompiledFramework.framework
-            ${SRCROOT}/../Pods/Target\ Support\ Files/Pods/Pods-frameworks.sh
+            ${PODS_ROOT}/Target\ Support\ Files/Pods/Pods-frameworks.sh
           )
           # Now pretend the same target has no more framework paths, it should update the targets input/output paths
           @pod_bundle.stubs(:framework_paths_by_config => {})
@@ -427,24 +416,13 @@ module Pod
         end
 
         it 'adds embed frameworks build phase input and output paths for vendored and non vendored frameworks' do
-          debug_vendored_framework = { :name => 'DebugVendoredFramework.framework',
-                                       :input_path => '${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework',
-                                       :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/DebugVendoredFramework.framework',
-                                       :dsym_name => 'DebugVendoredFramework.framework.dSYM',
-                                       :dsym_input_path => '${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework.dSYM',
-                                       :dsym_output_path => '${DWARF_DSYM_FOLDER_PATH}/DebugVendoredFramework.framework.dSYM' }
+          debug_vendored_framework = Target::FrameworkPaths.new('${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework',
+                                                                '${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework.dSYM')
 
-          debug_non_vendored_framework = { :name => 'DebugCompiledFramework.framework',
-                                           :input_path => '${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/DebugCompiledFramework.framework',
-                                           :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/DebugCompiledFramework.framework' }
+          debug_non_vendored_framework = Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/DebugCompiledFramework.framework')
 
-          release_vendored_framework = { :name => 'ReleaseVendoredFramework.framework',
-                                         :input_path => '${PODS_ROOT}/ReleaseVendoredFramework/ios/ReleaseVendoredFramework.framework',
-                                         :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/ReleaseVendoredFramework.framework',
-                                         :dsym_name => 'ReleaseVendoredFramework.framework.dSYM',
-                                         :dsym_input_path => '${PODS_ROOT}/ReleaseVendoredFramework/ios/ReleaseVendoredFramework.framework.dSYM',
-                                         :dsym_output_path => '${DWARF_DSYM_FOLDER_PATH}/ReleaseVendoredFramework.framework.dSYM' }
-
+          release_vendored_framework = Target::FrameworkPaths.new('${PODS_ROOT}/ReleaseVendoredFramework/ios/ReleaseVendoredFramework.framework',
+                                                                  '${PODS_ROOT}/ReleaseVendoredFramework/ios/ReleaseVendoredFramework.framework.dSYM')
           framework_paths_by_config = {
             'Debug' => [debug_vendored_framework, debug_non_vendored_framework],
             'Release' => [release_vendored_framework],
@@ -459,7 +437,7 @@ module Pod
             ${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework.dSYM
             ${PODS_ROOT}/ReleaseVendoredFramework/ios/ReleaseVendoredFramework.framework
             ${PODS_ROOT}/ReleaseVendoredFramework/ios/ReleaseVendoredFramework.framework.dSYM
-            ${SRCROOT}/../Pods/Target\ Support\ Files/Pods/Pods-frameworks.sh
+            ${PODS_ROOT}/Target\ Support\ Files/Pods/Pods-frameworks.sh
           )
           phase.output_paths.sort.should == %w(
             ${DWARF_DSYM_FOLDER_PATH}/DebugVendoredFramework.framework.dSYM
@@ -471,27 +449,15 @@ module Pod
         end
 
         it 'adds embed frameworks build phase input and output paths for vendored and non vendored frameworks without duplicate' do
-          debug_vendored_framework = { :name => 'SomeFramework.framework',
-                                       :input_path => '${PODS_ROOT}/DebugVendoredFramework/ios/SomeFramework.framework',
-                                       :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/SomeFramework.framework',
-                                       :dsym_name => 'SomeFramework.framework.dSYM',
-                                       :dsym_input_path => '${PODS_ROOT}/DebugVendoredFramework/ios/SomeFramework.framework.dSYM',
-                                       :dsym_output_path => '${DWARF_DSYM_FOLDER_PATH}/SomeFramework.framework.dSYM' }
+          debug_vendored_framework = Target::FrameworkPaths.new('${PODS_ROOT}/DebugVendoredFramework/ios/SomeFramework.framework',
+                                                                '${PODS_ROOT}/DebugVendoredFramework/ios/SomeFramework.framework.dSYM')
 
-          debug_non_vendored_framework = { :name => 'CompiledFramework.framework',
-                                           :input_path => '${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/CompiledFramework.framework',
-                                           :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/CompiledFramework.framework' }
+          debug_non_vendored_framework = Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/CompiledFramework.framework')
 
-          release_vendored_framework = { :name => 'ReleaseVendoredFramework.framework',
-                                         :input_path => '${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework',
-                                         :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/SomeFramework.framework',
-                                         :dsym_name => 'SomeFramework.framework.dSYM',
-                                         :dsym_input_path => '${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework.dSYM',
-                                         :dsym_output_path => '${DWARF_DSYM_FOLDER_PATH}/SomeFramework.framework.dSYM' }
+          release_vendored_framework = Target::FrameworkPaths.new('${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework',
+                                                                  '${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework.dSYM')
 
-          release_non_vendored_framework = { :name => 'CompiledFramework.framework',
-                                             :input_path => '${BUILT_PRODUCTS_DIR}/ReleaseCompiledFramework/CompiledFramework.framework',
-                                             :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/CompiledFramework.framework' }
+          release_non_vendored_framework = Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/ReleaseCompiledFramework/CompiledFramework.framework')
 
           framework_paths_by_config = {
             'Debug' => [debug_vendored_framework, debug_non_vendored_framework],
@@ -508,7 +474,7 @@ module Pod
             ${PODS_ROOT}/DebugVendoredFramework/ios/SomeFramework.framework.dSYM
             ${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework
             ${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework.dSYM
-            ${SRCROOT}/../Pods/Target\ Support\ Files/Pods/Pods-frameworks.sh
+            ${PODS_ROOT}/Target\ Support\ Files/Pods/Pods-frameworks.sh
           )
           phase.output_paths.sort.should == %w(
             ${DWARF_DSYM_FOLDER_PATH}/SomeFramework.framework.dSYM
@@ -524,6 +490,10 @@ module Pod
           phase = target.shell_script_build_phases.find { |bp| bp.name == @user_script_phase_name }
           phase.name.should == '[CP-User] Custom Script'
           phase.shell_script.should == 'echo "Hello World"'
+          phase.shell_path.should == '/bin/sh'
+          phase.input_paths.should.be.nil
+          phase.output_paths.should.be.nil
+          phase.show_env_vars_in_log.should == '1'
         end
 
         it 'removes outdated custom shell script phases' do
@@ -644,6 +614,47 @@ module Pod
             '[CP] Embed Pods Frameworks',
             '[CP] Copy Pods Resources',
           ]
+        end
+      end
+
+      describe 'Script paths' do
+        it 'calculates the output paths of the embed frameworks script' do
+          paths = [
+            Target::FrameworkPaths.new('${PODS_ROOT}/DebugVendoredFramework/ios/SomeFramework.framework',
+                                       '${PODS_ROOT}/DebugVendoredFramework/ios/SomeFramework.framework.dSYM'),
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/CompiledFramework.framework'),
+            Target::FrameworkPaths.new('${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework',
+                                       '${PODS_ROOT}/ReleaseVendoredFramework/ios/SomeFramework.framework.dSYM'),
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/ReleaseCompiledFramework/CompiledFramework.framework'),
+          ]
+          TargetIntegrator.framework_output_paths(paths).sort.should == %w(
+            ${DWARF_DSYM_FOLDER_PATH}/SomeFramework.framework.dSYM
+            ${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/CompiledFramework.framework
+            ${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/SomeFramework.framework
+          )
+        end
+
+        it 'calculates the output paths of the copy resources script' do
+          resource_paths = %w(
+            ${PODS_CONFIGURATION_BUILD_DIR}/DebugLib/DebugAssets.xcassets
+            ${PODS_CONFIGURATION_BUILD_DIR}/DebugLib/DebugDataModel.xcdatamodeld
+            ${PODS_CONFIGURATION_BUILD_DIR}/DebugLib/DebugDataModel.xcdatamodel
+            ${PODS_CONFIGURATION_BUILD_DIR}/DebugLib/DebugMappingModel.xcmappingmodel
+            ${PODS_CONFIGURATION_BUILD_DIR}/DebugLib/DebugLib.bundle
+            ${PODS_CONFIGURATION_BUILD_DIR}/ReleaseLib/ReleaseLib.bundle
+            ${PODS_CONFIGURATION_BUILD_DIR}/ReleaseLib/ReleaseLibXIB.xib
+            ${PODS_CONFIGURATION_BUILD_DIR}/ReleaseLib/ReleaseLib.storyboard
+          )
+          TargetIntegrator.resource_output_paths(resource_paths).sort.should == %w(
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Assets.car
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/DebugDataModel.mom
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/DebugDataModel.momd
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/DebugLib.bundle
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/DebugMappingModel.cdm
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ReleaseLib.bundle
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ReleaseLib.storyboardc
+            ${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ReleaseLibXIB.nib
+          )
         end
       end
 

@@ -229,6 +229,11 @@ describe_cli 'pod' do
                             'install --no-repo-update'
     end
 
+    describe 'Installs a pod with multiple test specs' do
+      behaves_like cli_spec 'install_multiple_test_specs',
+                            'install --no-repo-update'
+    end
+
     description = 'Installs a Pod with an external source'
     if has_mercurial
       describe description do
@@ -289,6 +294,11 @@ describe_cli 'pod' do
                             'install --no-repo-update'
     end
 
+    describe 'Integrates a project using generate_multiple_pod_projects option' do
+      behaves_like cli_spec 'install_multi_pods_project',
+                            'install --no-repo-update'
+    end
+
     describe 'Integrates a Pod using a dynamic vendored framework' do
       # We have to disable verbose mode by adding --no-verbose here,
       # otherwise curl output is included in execution output.
@@ -335,6 +345,15 @@ describe_cli 'pod' do
     describe 'Updates a selected Pod in an existing installation' do
       behaves_like cli_spec 'update_selected',
                             'update Reachability --no-repo-update'
+    end
+  end
+
+  #--------------------------------------#
+
+  describe 'Pod outdated' do
+    describe 'Prints outdated specs' do
+      behaves_like cli_spec 'outdated_multiple_specs',
+                            'outdated --no-repo-update'
     end
   end
 

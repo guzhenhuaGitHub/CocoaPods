@@ -11,7 +11,7 @@ module Pod
         self.description = <<-DESC
         Validates `NAME.podspec` or `*.podspec` in the current working dir,
         creates a directory and version folder for the pod in the local copy of
-        `REPO` (~/.cocoapods/repos/[REPO]), copies the podspec file into the
+        `REPO` (#{Config.instance.repos_dir}/[REPO]), copies the podspec file into the
         version directory, and finally it pushes `REPO` to its remote.
         DESC
 
@@ -24,6 +24,7 @@ module Pod
           [
             ['--allow-warnings', 'Allows pushing even if there are warnings'],
             ['--use-libraries', 'Linter uses static libraries to install the spec'],
+            ['--use-modular-headers', 'Lint uses modular headers during installation'],
             ['--sources=https://github.com/artsy/Specs,master', 'The sources from which to pull dependent pods ' \
              '(defaults to all available repos). ' \
              'Multiple sources must be comma-delimited.'],
@@ -48,6 +49,7 @@ module Pod
           @source_urls = argv.option('sources', config.sources_manager.all.map(&:url).join(',')).split(',')
           @podspec = argv.shift_argument
           @use_frameworks = !argv.flag?('use-libraries')
+          @use_modular_headers = argv.flag?('use-modular-headers', false)
           @private = argv.flag?('private', true)
           @message = argv.option('commit-message')
           @commit_message = argv.flag?('commit-message', false)
@@ -131,6 +133,7 @@ module Pod
             validator = Validator.new(podspec, @source_urls)
             validator.allow_warnings = @allow_warnings
             validator.use_frameworks = @use_frameworks
+            validator.use_modular_headers = @use_modular_headers
             validator.ignore_public_only_results = @private
             validator.swift_version = @swift_version
             validator.skip_import_validation = @skip_import_validation
@@ -182,18 +185,20 @@ module Pod
           podspec_files.each do |spec_file|
             spec = Pod::Specification.from_file(spec_file)
             output_path = @source.pod_path(spec.name) + spec.version.to_s
-            if @message && !@message.empty?
-              message = @message
-            elsif output_path.exist?
-              unless @allow_overwrite
-                raise Informative, "#{spec} already exists and overwriting has been disabled."
-              end
-              message = "[Fix] #{spec}"
-            elsif output_path.dirname.directory?
-              message = "[Update] #{spec}"
-            else
-              message = "[Add] #{spec}"
+            message = if @message && !@message.empty?
+                        @message
+                      elsif output_path.exist?
+                        "[Fix] #{spec}"
+                      elsif output_path.dirname.directory?
+                        "[Update] #{spec}"
+                      else
+                        "[Add] #{spec}"
+                      end
+
+            if output_path.exist? && !@allow_overwrite
+              raise Informative, "#{spec} already exists and overwriting has been disabled."
             end
+
             FileUtils.mkdir_p(output_path)
 
             if @use_json

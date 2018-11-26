@@ -1,3 +1,5 @@
+require 'stringio'
+
 module Pod
   class Installer
     class Xcode
@@ -7,13 +9,15 @@ module Pod
         # by the target.
         #
         class TargetInstaller
+          include TargetInstallerHelper
+
           # @return [Sandbox] sandbox
           #         The sandbox where the support files should be generated.
           #
           attr_reader :sandbox
 
           # @return [Pod::Project]
-          #         The `Pods/Pods.xcodeproj` to install the target into.
+          #         The project to install the target into.
           #
           attr_reader :project
 
@@ -87,39 +91,13 @@ module Pod
               settings['ARCHS'] = target.archs
             end
 
-            if target.requires_frameworks?
-              if target.static_framework?
-                settings['MACH_O_TYPE'] = 'staticlib'
-              end
-            else
+            if target.build_as_static_framework?
+              settings['MACH_O_TYPE'] = 'staticlib'
+            elsif target.build_as_static_library?
               settings.merge!('OTHER_LDFLAGS' => '', 'OTHER_LIBTOOLFLAGS' => '')
             end
 
             settings
-          end
-
-          # @param [Generator] generator
-          #        the generator to use for generating the content.
-          #
-          # @param [Pathname] path
-          #        the pathname to save the content into.
-          #
-          # Saves the content the provided path unless the path exists and the contents are exactly the same.
-          #
-          # @return [Object] the result of the generator.
-          #
-          def update_changed_file(generator, path)
-            if path.exist?
-              result = generator.save_as(support_files_temp_dir)
-              unless FileUtils.identical?(support_files_temp_dir, path)
-                FileUtils.mv(support_files_temp_dir, path)
-              end
-            else
-              path.dirname.mkpath
-              result = generator.save_as(path)
-            end
-            clean_support_files_temp_dir if support_files_temp_dir.exist?
-            result
           end
 
           # Creates the directory where to store the support files of the target.
@@ -131,7 +109,7 @@ module Pod
           # Remove temp file whose store .prefix/config/dummy file.
           #
           def clean_support_files_temp_dir
-            support_files_temp_dir.rmtree
+            support_files_temp_dir.rmtree if support_files_temp_dir.exist?
           end
 
           # @return [String] The temp file path to store temporary files.
@@ -160,16 +138,8 @@ module Pod
           # @return [void]
           #
           def create_info_plist_file(path, native_target, version, platform, bundle_package_type = :fmwk)
-            UI.message "- Generating Info.plist file at #{UI.path(path)}" do
-              generator = Generator::InfoPlistFile.new(version, platform, bundle_package_type)
-              update_changed_file(generator, path)
-              add_file_to_support_group(path)
-
-              native_target.build_configurations.each do |c|
-                relative_path = path.relative_path_from(sandbox.root)
-                c.build_settings['INFOPLIST_FILE'] = relative_path.to_s
-              end
-            end
+            create_info_plist_file_with_sandbox(@sandbox, path, native_target, version, platform, bundle_package_type)
+            add_file_to_support_group(path)
           end
 
           # Creates the module map file which ensures that the umbrella header is
@@ -181,16 +151,23 @@ module Pod
           # @return [void]
           #
           def create_module_map(native_target)
-            path = target.module_map_path
+            path = target.module_map_path_to_write
             UI.message "- Generating module map file at #{UI.path(path)}" do
               generator = Generator::ModuleMap.new(target)
               yield generator if block_given?
               update_changed_file(generator, path)
               add_file_to_support_group(path)
 
+              linked_path = target.module_map_path
+              if path != linked_path
+                linked_path.dirname.mkpath
+                source = path.relative_path_from(linked_path.dirname)
+                FileUtils.ln_sf(source, linked_path)
+              end
+
+              relative_path_string = target.module_map_path.relative_path_from(sandbox.root).to_s
               native_target.build_configurations.each do |c|
-                relative_path = path.relative_path_from(sandbox.root)
-                c.build_settings['MODULEMAP_FILE'] = relative_path.to_s
+                c.build_settings['MODULEMAP_FILE'] = relative_path_string
               end
             end
           end
@@ -207,7 +184,7 @@ module Pod
           # @return [void]
           #
           def create_umbrella_header(native_target)
-            path = target.umbrella_header_path
+            path = target.umbrella_header_path_to_write
             UI.message "- Generating umbrella header at #{UI.path(path)}" do
               generator = Generator::UmbrellaHeader.new(target)
               yield generator if block_given?
@@ -216,10 +193,16 @@ module Pod
               # Add the file to the support group and the native target,
               # so it will been added to the header build phase
               file_ref = add_file_to_support_group(path)
-              native_target.add_file_references([file_ref])
+              build_file = native_target.headers_build_phase.add_file_reference(file_ref)
 
-              acl = target.requires_frameworks? ? 'Public' : 'Project'
-              build_file = native_target.headers_build_phase.build_file(file_ref)
+              linked_path = target.umbrella_header_path
+              if path != linked_path
+                linked_path.dirname.mkpath
+                source = path.relative_path_from(linked_path.dirname)
+                FileUtils.ln_sf(source, linked_path)
+              end
+
+              acl = target.build_as_framework? ? 'Public' : 'Project'
               build_file.settings ||= {}
               build_file.settings['ATTRIBUTES'] = [acl]
             end

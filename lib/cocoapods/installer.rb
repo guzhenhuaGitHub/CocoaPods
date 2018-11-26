@@ -1,5 +1,6 @@
 require 'active_support/core_ext/string/inflections'
 require 'fileutils'
+require 'cocoapods/podfile'
 
 module Pod
   # The Installer is responsible of taking a Podfile and transform it in the
@@ -41,9 +42,6 @@ module Pod
     autoload :Xcode,                      'cocoapods/installer/xcode'
 
     include Config::Mixin
-    include InstallationOptions::Mixin
-
-    delegate_installation_options { podfile }
 
     # @return [Sandbox] The sandbox where the Pods should be installed.
     #
@@ -72,6 +70,7 @@ module Pod
 
       @use_default_plugins = true
       @has_dependencies = true
+      @pod_installers = []
     end
 
     # @return [Hash, Boolean, nil] Pods that have been requested to be
@@ -96,6 +95,25 @@ module Pod
     #
     attr_accessor :use_default_plugins
     alias_method :use_default_plugins?, :use_default_plugins
+
+    # @return [Boolean] Whether installation should verify that there are no
+    #                   Podfile or Lockfile changes. Defaults to false.
+    #
+    attr_accessor :deployment
+    alias_method :deployment?, :deployment
+
+    #-------------------------------------------------------------------------#
+
+    private
+
+    # @return [Array<PodSourceInstaller>] the pod installers created
+    #         while installing pod targets
+    #
+    attr_reader :pod_installers
+
+    #-------------------------------------------------------------------------#
+
+    public
 
     # Installs the Pods.
     #
@@ -155,6 +173,12 @@ module Pod
         validate_build_configurations
         clean_sandbox
       end
+
+      UI.section 'Verifying no changes' do
+        verify_no_podfile_changes!
+        verify_no_lockfile_changes!
+      end if deployment?
+
       analyzer
     end
 
@@ -172,19 +196,43 @@ module Pod
 
     private
 
-    def create_generator
-      Xcode::PodsProjectGenerator.new(sandbox, aggregate_targets, pod_targets, analysis_result, installation_options, config)
+    def create_generator(generate_multiple_pod_projects = false)
+      if generate_multiple_pod_projects
+        Xcode::MultiPodsProjectGenerator.new(sandbox, aggregate_targets, pod_targets, analysis_result, installation_options, config)
+      else
+        Xcode::SinglePodsProjectGenerator.new(sandbox, aggregate_targets, pod_targets, analysis_result, installation_options, config)
+      end
     end
 
-    # Generate the 'Pods/Pods.xcodeproj' project.
+    # Generates the Xcode project(s) that go inside the `Pods/` directory.
     #
-    def generate_pods_project(generator = create_generator)
+    def generate_pods_project(generator = create_generator(installation_options.generate_multiple_pod_projects))
       UI.section 'Generating Pods project' do
-        @target_installation_results = generator.generate!
-        @pods_project = generator.project
+        pod_project_generation_result = generator.generate!
+        @target_installation_results = pod_project_generation_result.target_installation_results
+        @pods_project = pod_project_generation_result.project
+        # The `pod_target_subprojects` is used for backwards compatibility so that consumers can iterate over
+        # all pod targets across projects without needing to open each one.
+        @pod_target_subprojects = pod_project_generation_result.projects_by_pod_targets.keys
+        projects_by_pod_targets = pod_project_generation_result.projects_by_pod_targets
         run_podfile_post_install_hooks
-        generator.write
-        generator.share_development_pod_schemes
+        pods_project_writer = Xcode::PodsProjectWriter.new(sandbox, pods_project,
+                                                           target_installation_results.pod_target_installation_results,
+                                                           installation_options)
+        pods_project_writer.write!
+        projects_by_pod_targets.each do |project, pod_targets|
+          pod_target_project_writer = Xcode::PodsProjectWriter.new(sandbox, project,
+                                                                   target_installation_results.pod_target_installation_results,
+                                                                   installation_options)
+          pod_target_project_writer.write!
+          generator.share_development_pod_schemes(project, development_pod_targets(pod_targets))
+        end
+
+        # Share the remaining pod targets. Generally this will be none for when `generate_multiple_pod_projects` is set to true
+        # and all pod_targets when set to false.
+        remaining_development_pods = development_pod_targets(pod_targets - projects_by_pod_targets.values.flatten)
+        generator.share_development_pod_schemes(pods_project, remaining_development_pods)
+
         write_lockfiles
       end
     end
@@ -209,6 +257,10 @@ module Pod
     #
     attr_reader :pods_project
 
+    # @return [Array<Pod::Project>] the subprojects nested under pods_project.
+    #
+    attr_reader :pod_target_subprojects
+
     # @return [Array<AggregateTarget>] The model representations of an
     #         aggregation of pod targets generated for a target definition
     #         in the Podfile as result of the analyzer.
@@ -218,13 +270,7 @@ module Pod
     # @return [Array<PodTarget>] The model representations of pod targets
     #         generated as result of the analyzer.
     #
-    def pod_targets
-      aggregate_target_pod_targets = aggregate_targets.flat_map(&:pod_targets)
-      test_dependent_targets = aggregate_target_pod_targets.flat_map do |pod_target|
-        pod_target.test_dependent_targets_by_spec_name.values.flatten
-      end
-      (aggregate_target_pod_targets + test_dependent_targets).uniq
-    end
+    attr_reader :pod_targets
 
     # @return [Array<Specification>] The specifications that were installed.
     #
@@ -238,19 +284,18 @@ module Pod
 
     # Performs the analysis.
     #
+    # @param  [Analyzer] analyzer the analyzer to use for analysis
+    #
     # @return [void]
     #
     def analyze(analyzer = create_analyzer)
-      analyzer.update = update
       @analysis_result = analyzer.analyze
-      @aggregate_targets = analyzer.result.targets
+      @aggregate_targets = @analysis_result.targets
+      @pod_targets = @analysis_result.pod_targets
     end
 
     def create_analyzer(plugin_sources = nil)
-      Analyzer.new(sandbox, podfile, lockfile, plugin_sources).tap do |analyzer|
-        analyzer.installation_options = installation_options
-        analyzer.has_dependencies = has_dependencies?
-      end
+      Analyzer.new(sandbox, podfile, lockfile, plugin_sources, has_dependencies?, update)
     end
 
     # Ensures that the white-listed build configurations are known to prevent
@@ -304,6 +349,28 @@ module Pod
       end
     end
 
+    # @raise [Informative] If there are any Podfile changes
+    #
+    def verify_no_podfile_changes!
+      return unless analysis_result.podfile_needs_install?
+
+      changed_state = analysis_result.podfile_state.to_s(:states => %i(added deleted changed))
+      raise Informative, "There were changes to the podfile in deployment mode:\n#{changed_state}"
+    end
+
+    # @raise [Informative] If there are any Lockfile changes
+    #
+    def verify_no_lockfile_changes!
+      new_lockfile = generate_lockfile
+      return if new_lockfile == lockfile
+
+      diff = Xcodeproj::Differ.hash_diff(lockfile.to_hash, new_lockfile.to_hash, :key_1 => 'Old Lockfile', :key_2 => 'New Lockfile')
+      pretty_diff = YAMLHelper.convert_hash(diff, Lockfile::HASH_KEY_ORDER, "\n\n")
+      pretty_diff.gsub!(':diff:', 'diff:'.yellow)
+
+      raise Informative, "There were changes to the lockfile in deployment mode:\n#{pretty_diff}"
+    end
+
     # Downloads, installs the documentation and cleans the sources of the Pods
     # which need to be installed.
     #
@@ -322,7 +389,7 @@ module Pod
             current_repo = analysis_result.specs_by_source.detect { |key, values| break key if values.map(&:name).include?(spec.name) }
             current_repo &&= current_repo.url || current_repo.name
             previous_spec_repo = sandbox.manifest.spec_repo(spec.name)
-            has_changed_repo = !previous_spec_repo.nil? && current_repo && (current_repo != previous_spec_repo)
+            has_changed_repo = !previous_spec_repo.nil? && current_repo && !current_repo.casecmp(previous_spec_repo).zero?
             title = "Installing #{spec.name} #{spec.version}"
             title << " (was #{previous_version} and source changed to `#{current_repo}` from `#{previous_spec_repo}`)" if has_changed_version && has_changed_repo
             title << " (was #{previous_version})" if has_changed_version && !has_changed_repo
@@ -342,20 +409,34 @@ module Pod
     end
 
     def create_pod_installer(pod_name)
-      specs_by_platform = {}
-      pod_targets.each do |pod_target|
-        if pod_target.root_spec.name == pod_name
-          specs_by_platform[pod_target.platform] ||= []
-          specs_by_platform[pod_target.platform].concat(pod_target.specs)
-        end
+      specs_by_platform = specs_for_pod(pod_name)
+
+      if specs_by_platform.empty?
+        requiring_targets = pod_targets.select { |pt| pt.recursive_dependent_targets.any? { |dt| dt.pod_name == pod_name } }
+        message = "Could not install '#{pod_name}' pod"
+        message += ", dependended upon by #{requiring_targets.to_sentence}" unless requiring_targets.empty?
+        message += '. There is either no platform to build for, or no target to build.'
+        raise StandardError, message
       end
 
-      raise Informative, "Could not install '#{pod_name}' pod. There is no target that supports it." if specs_by_platform.empty?
-
-      @pod_installers ||= []
       pod_installer = PodSourceInstaller.new(sandbox, specs_by_platform, :can_cache => installation_options.clean?)
-      @pod_installers << pod_installer
+      pod_installers << pod_installer
       pod_installer
+    end
+
+    # The specifications matching the specified pod name
+    #
+    # @param  [String] pod_name the name of the pod
+    #
+    # @return [Hash{Platform => Array<Specification>}] the specifications grouped by platform
+    #
+    def specs_for_pod(pod_name)
+      pod_targets.each_with_object({}) do |pod_target, hash|
+        if pod_target.root_spec.name == pod_name
+          hash[pod_target.platform] ||= []
+          hash[pod_target.platform].concat(pod_target.specs)
+        end
+      end
     end
 
     # Install the Pods. If the resolver indicated that a Pod should be
@@ -372,21 +453,16 @@ module Pod
 
     # Cleans the sources of the Pods if the config instructs to do so.
     #
-    # @todo Why the @pod_installers might be empty?
     #
     def clean_pod_sources
       return unless installation_options.clean?
-      return unless @pod_installers
-      @pod_installers.each(&:clean!)
+      pod_installers.each(&:clean!)
     end
 
     # Unlocks the sources of the Pods.
     #
-    # @todo Why the @pod_installers might be empty?
-    #
     def unlock_pod_sources
-      return unless @pod_installers
-      @pod_installers.each do |installer|
+      pod_installers.each do |installer|
         pod_target = pod_targets.find { |target| target.pod_name == installer.name }
         installer.unlock_files!(pod_target.file_accessors)
       end
@@ -394,12 +470,9 @@ module Pod
 
     # Locks the sources of the Pods if the config instructs to do so.
     #
-    # @todo Why the @pod_installers might be empty?
-    #
     def lock_pod_sources
       return unless installation_options.lock_pod_sources?
-      return unless @pod_installers
-      @pod_installers.each do |installer|
+      pod_installers.each do |installer|
         pod_target = pod_targets.find { |target| target.pod_name == installer.name }
         installer.lock_files!(pod_target.file_accessors)
       end
@@ -424,11 +497,9 @@ module Pod
     # @return [void]
     #
     def perform_post_install_actions
-      unlock_pod_sources
       run_plugins_post_install_hooks
       warn_for_deprecations
       warn_for_installed_script_phases
-      lock_pod_sources
       print_post_install_message
     end
 
@@ -446,13 +517,26 @@ module Pod
     # Runs the registered callbacks for the plugins post install hooks.
     #
     def run_plugins_post_install_hooks
-      context = PostInstallHooksContext.generate(sandbox, aggregate_targets)
-      HooksManager.run(:post_install, context, plugins)
+      # This short-circuits because unlocking pod sources is expensive
+      if any_plugin_post_install_hooks?
+        unlock_pod_sources
+
+        context = PostInstallHooksContext.generate(sandbox, pods_project, aggregate_targets)
+        HooksManager.run(:post_install, context, plugins)
+      end
+
+      lock_pod_sources
+    end
+
+    # @return [Boolean] whether there are any plugin post-install hooks to run
+    #
+    def any_plugin_post_install_hooks?
+      HooksManager.hooks_to_run(:post_install, plugins).any?
     end
 
     # Runs the registered callbacks for the source provider plugin hooks.
     #
-    # @return [void]
+    # @return [Array<Pod::Source>] the plugin sources
     #
     def run_source_provider_hooks
       context = SourceProviderHooksContext.generate
@@ -545,14 +629,20 @@ module Pod
       end
     end
 
+    # @return [Lockfile] The lockfile to write to disk.
+    #
+    def generate_lockfile
+      external_source_pods = analysis_result.podfile_dependency_cache.podfile_dependencies.select(&:external_source).map(&:root_name).uniq
+      checkout_options = sandbox.checkout_sources.select { |root_name, _| external_source_pods.include? root_name }
+      Lockfile.generate(podfile, analysis_result.specifications, checkout_options, analysis_result.specs_by_source)
+    end
+
     # Writes the Podfile and the lock files.
     #
     # @return [void]
     #
     def write_lockfiles
-      external_source_pods = analysis_result.podfile_dependency_cache.podfile_dependencies.select(&:external_source).map(&:root_name).uniq
-      checkout_options = sandbox.checkout_sources.select { |root_name, _| external_source_pods.include? root_name }
-      @lockfile = Lockfile.generate(podfile, analysis_result.specifications, checkout_options, analysis_result.specs_by_source)
+      @lockfile = generate_lockfile
 
       UI.message "- Writing Lockfile in #{UI.path config.lockfile_path}" do
         @lockfile.write_to_disk(config.lockfile_path)
@@ -575,7 +665,7 @@ module Pod
     def integrate_user_project
       UI.section "Integrating client #{'project'.pluralize(aggregate_targets.map(&:user_project_path).uniq.count)}" do
         installation_root = config.installation_root
-        integrator = UserProjectIntegrator.new(podfile, sandbox, installation_root, aggregate_targets)
+        integrator = UserProjectIntegrator.new(podfile, sandbox, installation_root, aggregate_targets, :use_input_output_paths => !installation_options.disable_input_output_paths?)
         integrator.integrate!
       end
     end
@@ -643,11 +733,13 @@ module Pod
 
     public
 
+    # @param [Array<PodTarget>] targets
+    #
     # @return [Array<PodTarget>] The targets of the development pods generated by
     #         the installation process. This can be used as a convenience method for external scripts.
     #
-    def development_pod_targets
-      pod_targets.select do |pod_target|
+    def development_pod_targets(targets = pod_targets)
+      targets.select do |pod_target|
         sandbox.local?(pod_target.pod_name)
       end
     end
@@ -671,6 +763,12 @@ module Pod
       analysis_result.sandbox_state
     end
 
+    # @return [InstallationOptions] the installation options to use during install
+    #
+    def installation_options
+      podfile.installation_options
+    end
+
     #-------------------------------------------------------------------------#
 
     public
@@ -684,9 +782,9 @@ module Pod
         plugin_sources = run_source_provider_hooks
         analyzer = create_analyzer(plugin_sources)
         analyze(analyzer)
-        if analyzer.podfile_needs_install?(analyzer.result)
+        if analysis_result.podfile_needs_install?
           raise Pod::Informative, 'The Podfile has changed, you must run `pod install`'
-        elsif analyzer.sandbox_needs_install?(analyzer.result)
+        elsif analysis_result.sandbox_needs_install?
           raise Pod::Informative, 'The `Pods` directory is out-of-date, you must run `pod install`'
         end
 

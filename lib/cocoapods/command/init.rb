@@ -14,7 +14,7 @@ module Pod
         It is possible to specify a list of dependencies which will be used by
         the template in the `Podfile.default` (normal targets) `Podfile.test`
         (test targets) files which should be stored in the
-        `~/.cocoapods/templates` folder.
+        `#{Config.instance.templates_dir}` folder.
       DESC
       self.arguments = [
         CLAide::Argument.new('XCODEPROJ', :false),
@@ -84,7 +84,9 @@ module Pod
       def target_module(app, tests)
         target_module = "\ntarget '#{app.name.gsub(/'/, "\\\\\'")}' do\n"
 
-        target_module << if app.resolved_build_setting('SWIFT_OPTIMIZATION_LEVEL').values.any?
+        app_uses_swift = app.source_build_phase.files_references.any? { |fr| File.extname(fr.path) == '.swift' }
+
+        target_module << if app_uses_swift
                            <<-RUBY
   # Comment the next line if you're not using Swift and don't want to use dynamic frameworks
   use_frameworks!

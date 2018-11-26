@@ -303,8 +303,9 @@ module Pod
         target_inspector.send(:compute_swift_version_from_targets, user_targets).should.equal '2.3'
       end
 
-      it 'returns nil if the version is not defined' do
+      it 'returns default if the version is not defined' do
         user_project = Xcodeproj::Project.new('path')
+        user_project.build_configuration_list.set_setting('SWIFT_VERSION', nil)
         target = user_project.new_target(:application, 'Target', :ios)
         target.build_configuration_list.set_setting('SWIFT_VERSION', nil)
 
@@ -312,7 +313,7 @@ module Pod
         user_targets = [target]
 
         target_inspector = TargetInspector.new(target_definition, config.installation_root)
-        target_inspector.send(:compute_swift_version_from_targets, user_targets).should.equal nil
+        target_inspector.send(:compute_swift_version_from_targets, user_targets).should.nil?
       end
 
       it 'raises if the user defined SWIFT_VERSION contains multiple unique versions are defined' do
@@ -362,6 +363,50 @@ module Pod
 
         target_inspector = TargetInspector.new(target_definition, config.installation_root)
         target_inspector.send(:compute_swift_version_from_targets, user_targets).should.equal '2.3'
+      end
+
+      describe 'with user xcconfig set' do
+        before do
+          @user_xcconfig = 'User.xcconfig'
+        end
+
+        after do
+          FileUtils.rm_f(@user_xcconfig) if File.exist?(@user_xcconfig)
+        end
+
+        it 'returns the xcconfig-level SWIFT_VERSION if the target has an existing user xcconfig set' do
+          user_project = Xcodeproj::Project.new('path')
+          user_project.build_configuration_list.set_setting('SWIFT_VERSION', '2.3')
+          target = user_project.new_target(:application, 'Target', :ios)
+          sample_config = user_project.new_file(@user_xcconfig)
+          File.write(sample_config.real_path, 'SWIFT_VERSION=3.0')
+          target.build_configurations.each do |config|
+            config.base_configuration_reference = sample_config
+          end
+
+          target_definition = Podfile::TargetDefinition.new(:default, nil)
+          user_targets = [target]
+
+          target_inspector = TargetInspector.new(target_definition, config.installation_root)
+          target_inspector.send(:compute_swift_version_from_targets, user_targets).should.equal '3.0'
+        end
+
+        it 'skips the xcconfig-level SWIFT_VERSION if the target has an existing user xcconfig set but without it' do
+          user_project = Xcodeproj::Project.new('path')
+          user_project.build_configuration_list.set_setting('SWIFT_VERSION', '2.3')
+          target = user_project.new_target(:application, 'Target', :ios)
+          sample_config = user_project.new_file(@user_xcconfig)
+          File.write(sample_config.real_path, 'SOMETHING_ELSE=3.0')
+          target.build_configurations.each do |config|
+            config.base_configuration_reference = sample_config
+          end
+
+          target_definition = Podfile::TargetDefinition.new(:default, nil)
+          user_targets = [target]
+
+          target_inspector = TargetInspector.new(target_definition, config.installation_root)
+          target_inspector.send(:compute_swift_version_from_targets, user_targets).should.equal '2.3'
+        end
       end
     end
   end

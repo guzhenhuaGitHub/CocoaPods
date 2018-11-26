@@ -7,7 +7,9 @@ module Pod
         @target_definition = Podfile::TargetDefinition.new('Pods', nil)
         @target_definition.abstract = false
         project_path = SpecHelper.fixture('SampleProject/SampleProject.xcodeproj')
-        @target = AggregateTarget.new(config.sandbox, false, {}, [], Platform.ios, @target_definition, config.sandbox.root.dirname, Xcodeproj::Project.open(project_path), ['A346496C14F9BE9A0080D870'], {})
+        @target = AggregateTarget.new(config.sandbox, false, {}, [], Platform.ios, @target_definition,
+                                      config.sandbox.root.dirname, Xcodeproj::Project.open(project_path),
+                                      ['A346496C14F9BE9A0080D870'], {})
       end
 
       it 'returns the target_definition that generated it' do
@@ -34,6 +36,22 @@ module Pod
         targets = @target.user_targets
         targets.count.should == 1
         targets.first.class.should == Xcodeproj::Project::PBXNativeTarget
+      end
+
+      it 'returns whether it has frameworks to embed' do
+        @target.stubs(:framework_paths_by_config).returns(
+          'DEBUG' => [Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework')],
+        )
+        @target.includes_frameworks?.should.be.true
+        @target.stubs(:framework_paths_by_config).returns('DEBUG' => [], 'RELEASE' => [])
+        @target.includes_frameworks?.should.be.false
+      end
+
+      it 'returns whether it has resources' do
+        @target.stubs(:resource_paths_by_config).returns('DEBUG' => %w(path/to/image.png banana/lib.png))
+        @target.includes_resources?.should.be.true
+        @target.stubs(:resource_paths_by_config).returns('DEBUG' => [], 'RELEASE' => [])
+        @target.includes_resources?.should.be.false
       end
     end
 
@@ -65,11 +83,11 @@ module Pod
       end
 
       it 'returns the path of the resources script relative to the user project' do
-        @target.copy_resources_script_relative_path.should == '${SRCROOT}/Pods/Target Support Files/Pods/Pods-resources.sh'
+        @target.copy_resources_script_relative_path.should == '${PODS_ROOT}/Target Support Files/Pods/Pods-resources.sh'
       end
 
       it 'returns the path of the frameworks script relative to the user project' do
-        @target.embed_frameworks_script_relative_path.should == '${SRCROOT}/Pods/Target Support Files/Pods/Pods-frameworks.sh'
+        @target.embed_frameworks_script_relative_path.should == '${PODS_ROOT}/Target Support Files/Pods/Pods-frameworks.sh'
       end
 
       it 'returns the path of the xcconfig file relative to the user project' do
@@ -87,13 +105,18 @@ module Pod
         @target_definition = Podfile::TargetDefinition.new('Pods', nil)
         @target_definition.abstract = false
         @target_definition.set_platform(:ios, '10.0')
-        @pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@spec], [@target_definition])
-        @target = AggregateTarget.new(config.sandbox, false, {}, [], Platform.ios, @target_definition, config.sandbox.root.dirname, nil, nil, 'Release' => [@pod_target], 'Debug' => [@pod_target])
+        file_accessor = fixture_file_accessor(@spec, Platform.ios)
+        @pod_target = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@spec], [@target_definition],
+                                    [file_accessor])
+        @target = AggregateTarget.new(config.sandbox, false, {}, [], Platform.ios, @target_definition,
+                                      config.sandbox.root.dirname, nil, nil, 'Release' => [@pod_target], 'Debug' => [@pod_target])
       end
 
       describe 'with configuration dependent pod targets' do
         before do
-          @pod_target_release = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@spec], [@target_definition])
+          file_accessor = fixture_file_accessor(@spec, Platform.ios)
+          @pod_target_release = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@spec],
+                                              [@target_definition], [file_accessor])
           @target.stubs(:pod_targets_for_build_configuration).with('Debug').returns([@pod_target])
           @target.stubs(:pod_targets_for_build_configuration).with('Release').returns([@pod_target, @pod_target_release])
           @target.stubs(:pod_targets).returns([@pod_target, @pod_target_release])
@@ -116,30 +139,28 @@ module Pod
       describe 'frameworks by config and input output paths' do
         before do
           @coconut_spec = fixture_spec('coconut-lib/CoconutLib.podspec')
-          @pod_target_release = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@coconut_spec], [@target_definition])
+          file_accessor = fixture_file_accessor(@coconut_spec, Platform.ios)
+          @pod_target_release = PodTarget.new(config.sandbox, false, {}, [],
+                                              Platform.ios, [@coconut_spec], [@target_definition],
+                                              [file_accessor])
           @target.stubs(:pod_targets).returns([@pod_target])
           @target.stubs(:user_build_configurations).returns('Debug' => :debug, 'Release' => :release)
         end
 
         it 'returns non vendored framework input and output paths by config' do
           @pod_target.stubs(:should_build?).returns(true)
-          @pod_target.stubs(:requires_frameworks?).returns(true)
+          @pod_target.stubs(:build_type).returns(Target::BuildType.dynamic_framework)
           @target.framework_paths_by_config['Debug'].should == [
-            { :name => 'BananaLib.framework',
-              :input_path => '${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/BananaLib.framework' },
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework'),
           ]
           @target.framework_paths_by_config['Release'].should == [
-            { :name => 'BananaLib.framework',
-              :input_path => '${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/BananaLib.framework' },
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework'),
           ]
         end
 
         it 'checks resource paths are empty for dynamic frameworks' do
           @pod_target.stubs(:should_build?).returns(true)
-          @pod_target.stubs(:requires_frameworks?).returns(true)
-          @pod_target.stubs(:static_framework?).returns(false)
+          @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
           @pod_target.stubs(:resource_paths).returns(['MyResources.bundle'])
           @target.stubs(:bridge_support_file).returns(nil)
           resource_paths_by_config = @target.resource_paths_by_config
@@ -149,9 +170,8 @@ module Pod
 
         it 'checks resource paths are included for static frameworks' do
           @pod_target.stubs(:should_build?).returns(true)
-          @pod_target.stubs(:requires_frameworks?).returns(true)
-          @pod_target.stubs(:static_framework?).returns(true)
-          @pod_target.stubs(:resource_paths).returns(['MyResources.bundle'])
+          @pod_target.stubs(:build_type => Target::BuildType.static_framework)
+          @pod_target.stubs(:resource_paths).returns('BananaLib' => ['MyResources.bundle'])
           @target.stubs(:bridge_support_file).returns(nil)
           resource_paths_by_config = @target.resource_paths_by_config
           resource_paths_by_config['Debug'].should == ['MyResources.bundle']
@@ -160,25 +180,19 @@ module Pod
 
         it 'returns non vendored frameworks by config with different release and debug targets' do
           @pod_target_release.stubs(:should_build?).returns(true)
-          @pod_target_release.stubs(:requires_frameworks?).returns(true)
+          @pod_target_release.stubs(:build_type => Target::BuildType.dynamic_framework)
           @pod_target.stubs(:should_build?).returns(true)
-          @pod_target.stubs(:requires_frameworks?).returns(true)
+          @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target.stubs(:pod_targets_for_build_configuration).with('Debug').returns([@pod_target])
           @target.stubs(:pod_targets_for_build_configuration).with('Release').returns([@pod_target, @pod_target_release])
           @target.stubs(:pod_targets).returns([@pod_target, @pod_target_release])
           framework_paths_by_config = @target.framework_paths_by_config
           framework_paths_by_config['Debug'].should == [
-            { :name => 'BananaLib.framework',
-              :input_path => '${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/BananaLib.framework' },
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework'),
           ]
           framework_paths_by_config['Release'].should == [
-            { :name => 'BananaLib.framework',
-              :input_path => '${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/BananaLib.framework' },
-            { :name => 'CoconutLib.framework',
-              :input_path => '${BUILT_PRODUCTS_DIR}/CoconutLib/CoconutLib.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/CoconutLib.framework' },
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework'),
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/CoconutLib/CoconutLib.framework'),
           ]
         end
 
@@ -186,28 +200,24 @@ module Pod
           path_list = Sandbox::PathList.new(fixture('banana-lib'))
           file_accessor = Sandbox::FileAccessor.new(path_list, @spec.consumer(:ios))
           @pod_target.stubs(:file_accessors).returns([file_accessor])
+          framework_path = Pathname('/some/absolute/path/to/FrameworkA.framework')
           @pod_target.file_accessors.first.stubs(:vendored_dynamic_artifacts).returns(
-            [Pathname('/some/absolute/path/to/FrameworkA.framework')],
+            [framework_path],
           )
+          framework_path.stubs(:relative_path_from).returns(Pathname.new('../../some/absolute/path/to/FrameworkA.framework'))
           @target.framework_paths_by_config['Debug'].should == [
-            { :name => 'FrameworkA.framework',
-              :input_path => '${PODS_ROOT}/../../../../../../../some/absolute/path/to/FrameworkA.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/FrameworkA.framework' },
+            Target::FrameworkPaths.new('${PODS_ROOT}/../../some/absolute/path/to/FrameworkA.framework'),
           ]
         end
 
         it 'returns correct input and output paths for non vendored frameworks' do
           @pod_target.stubs(:should_build?).returns(true)
-          @pod_target.stubs(:requires_frameworks?).returns(true)
+          @pod_target.stubs(:build_type => Target::BuildType.dynamic_framework)
           @target.framework_paths_by_config['Debug'].should == [
-            { :name => 'BananaLib.framework',
-              :input_path => '${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/BananaLib.framework' },
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework'),
           ]
           @target.framework_paths_by_config['Release'].should == [
-            { :name => 'BananaLib.framework',
-              :input_path => '${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/BananaLib.framework' },
+            Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/BananaLib/BananaLib.framework'),
           ]
         end
 
@@ -215,13 +225,13 @@ module Pod
           path_list = Sandbox::PathList.new(fixture('banana-lib'))
           file_accessor = Sandbox::FileAccessor.new(path_list, @spec.consumer(:ios))
           @pod_target.stubs(:file_accessors).returns([file_accessor])
+          framework_path = Pathname('/absolute/path/to/FrameworkA.framework')
           @pod_target.file_accessors.first.stubs(:vendored_dynamic_artifacts).returns(
-            [Pathname('/absolute/path/to/FrameworkA.framework')],
+            [framework_path],
           )
+          framework_path.stubs(:relative_path_from).returns(Pathname.new('../../absolute/path/to/FrameworkA.framework'))
           @target.framework_paths_by_config['Debug'].should == [
-            { :name => 'FrameworkA.framework',
-              :input_path => '${PODS_ROOT}/../../../../../../../absolute/path/to/FrameworkA.framework',
-              :output_path => '${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/FrameworkA.framework' },
+            Target::FrameworkPaths.new('${PODS_ROOT}/../../absolute/path/to/FrameworkA.framework'),
           ]
         end
       end
@@ -238,6 +248,28 @@ module Pod
         consumer_reps = @target.spec_consumers.map { |consumer| [consumer.spec.name, consumer.platform_name] }
         consumer_reps.should == [['BananaLib', :ios]]
       end
+
+      describe '#merge_embedded_pod_targets' do
+        it 'merges the embedded pod targets with the current pod targets' do
+          other_pod_target = stub('other pod target')
+          embedded_pod_targets_for_build_configuration = {
+            'Debug' => [@pod_target],
+            'Release' => [other_pod_target],
+          }
+
+          merged = @target.merge_embedded_pod_targets(embedded_pod_targets_for_build_configuration)
+          merged.pod_targets_for_build_configuration('Debug').should == [@pod_target]
+          merged.pod_targets_for_build_configuration('Release').should == [@pod_target, other_pod_target]
+        end
+
+        it 'copies over search paths aggregate targets' do
+          search_paths_aggregate_targets = [stub('other aggregate target')]
+          @target.stubs(:search_paths_aggregate_targets => search_paths_aggregate_targets)
+          merged = @target.merge_embedded_pod_targets({})
+          merged.search_paths_aggregate_targets.should == search_paths_aggregate_targets
+          merged.search_paths_aggregate_targets.should.be.frozen
+        end
+      end
     end
 
     describe 'Product type dependent helpers' do
@@ -253,7 +285,7 @@ module Pod
 
         describe 'Host requires frameworks' do
           before do
-            @target.stubs(:host_requires_frameworks?).returns(true)
+            @target.stubs(:build_type).returns(Target::BuildType.static_framework)
           end
 
           it 'returns the product name' do

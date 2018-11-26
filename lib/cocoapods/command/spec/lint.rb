@@ -23,9 +23,13 @@ module Pod
             ['--no-clean', 'Lint leaves the build directory intact for inspection'],
             ['--fail-fast', 'Lint stops on the first failing platform or subspec'],
             ['--use-libraries', 'Lint uses static libraries to install the spec'],
+            ['--use-modular-headers', 'Lint uses modular headers during installation'],
             ['--sources=https://github.com/artsy/Specs,master', 'The sources from which to pull dependent pods ' \
              '(defaults to https://github.com/CocoaPods/Specs.git). ' \
              'Multiple sources must be comma-delimited.'],
+            ['--platforms=ios,macos', 'Lint against specific platforms' \
+              '(defaults to all platforms supported by the podspec).' \
+              'Multiple platforms must be comma-delimited'],
             ['--private', 'Lint skips checks that apply only to public specs'],
             ['--swift-version=VERSION', 'The SWIFT_VERSION that should be used to lint the spec. ' \
              'This takes precedence over a .swift-version file.'],
@@ -42,7 +46,9 @@ module Pod
           @subspecs        = argv.flag?('subspecs', true)
           @only_subspec    = argv.option('subspec')
           @use_frameworks  = !argv.flag?('use-libraries')
+          @use_modular_headers = argv.flag?('use-modular-headers')
           @source_urls     = argv.option('sources', 'https://github.com/CocoaPods/Specs.git').split(',')
+          @platforms       = argv.option('platforms', '').split(',')
           @private         = argv.flag?('private', false)
           @swift_version   = argv.option('swift-version', nil)
           @skip_import_validation = argv.flag?('skip-import-validation', false)
@@ -55,7 +61,7 @@ module Pod
           UI.puts
           failure_reasons = []
           podspecs_to_lint.each do |podspec|
-            validator                = Validator.new(podspec, @source_urls)
+            validator                = Validator.new(podspec, @source_urls, @platforms)
             validator.quick          = @quick
             validator.no_clean       = !@clean
             validator.fail_fast      = @fail_fast
@@ -63,6 +69,7 @@ module Pod
             validator.no_subspecs    = !@subspecs || @only_subspec
             validator.only_subspec   = @only_subspec
             validator.use_frameworks = @use_frameworks
+            validator.use_modular_headers = @use_modular_headers
             validator.ignore_public_only_results = @private
             validator.swift_version = @swift_version
             validator.skip_import_validation = @skip_import_validation

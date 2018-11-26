@@ -34,7 +34,7 @@ module Pod
         def validate!
           verify_no_duplicate_framework_and_library_names
           verify_no_static_framework_transitive_dependencies
-          verify_no_pods_used_with_multiple_swift_versions
+          verify_swift_pods_swift_version
           verify_swift_pods_have_module_dependencies
         end
 
@@ -47,11 +47,11 @@ module Pod
               file_accessors = pod_targets.flat_map(&:file_accessors)
 
               frameworks = file_accessors.flat_map(&:vendored_frameworks).uniq.map(&:basename)
-              frameworks += pod_targets.select { |pt| pt.should_build? && pt.requires_frameworks? }.map(&:product_module_name).uniq
+              frameworks += pod_targets.select { |pt| pt.should_build? && pt.build_as_framework? }.map(&:product_module_name).uniq
               verify_no_duplicate_names(frameworks, aggregate_target.label, 'frameworks')
 
               libraries = file_accessors.flat_map(&:vendored_libraries).uniq.map(&:basename)
-              libraries += pod_targets.select { |pt| pt.should_build? && !pt.requires_frameworks? }.map(&:product_name)
+              libraries += pod_targets.select { |pt| pt.should_build? && pt.build_as_library? }.map(&:product_name)
               verify_no_duplicate_names(libraries, aggregate_target.label, 'libraries')
             end
           end
@@ -68,45 +68,58 @@ module Pod
 
         def verify_no_static_framework_transitive_dependencies
           aggregate_targets.each do |aggregate_target|
-            next unless aggregate_target.requires_frameworks?
+            aggregate_target.user_build_configurations.each_key do |config|
+              pod_targets = aggregate_target.pod_targets_for_build_configuration(config)
+              built_targets, unbuilt_targets = pod_targets.partition(&:should_build?)
+              dynamic_pod_targets = built_targets.select(&:build_as_dynamic?)
 
-            aggregate_target.user_build_configurations.keys.each do |config|
-              dynamic_pod_targets = aggregate_target.pod_targets_for_build_configuration(config).reject(&:static_framework?)
-
-              dependencies = dynamic_pod_targets.select(&:should_build?).flat_map(&:dependencies)
-              depended_upon_targets = dynamic_pod_targets.select { |t| dependencies.include?(t.pod_name) && !t.should_build? }
+              dependencies = dynamic_pod_targets.flat_map(&:dependencies)
+              depended_upon_targets = unbuilt_targets.select { |t| dependencies.include?(t.pod_name) }
 
               static_libs = depended_upon_targets.flat_map(&:file_accessors).flat_map(&:vendored_static_artifacts)
               unless static_libs.empty?
                 raise Informative, "The '#{aggregate_target.label}' target has " \
-                  "transitive dependencies that include static binaries: (#{static_libs.to_sentence})"
+                  "transitive dependencies that include statically linked binaries: (#{static_libs.to_sentence})"
               end
 
-              static_framework_deps = dynamic_pod_targets.select(&:should_build?).flat_map(&:recursive_dependent_targets).select(&:static_framework?)
-              unless static_framework_deps.empty?
+              static_deps = dynamic_pod_targets.flat_map(&:recursive_dependent_targets).select(&:build_as_static?).uniq
+              unless static_deps.empty?
                 raise Informative, "The '#{aggregate_target.label}' target has " \
-                  "transitive dependencies that include static frameworks: (#{static_framework_deps.flat_map(&:name).to_sentence})"
+                  "transitive dependencies that include statically linked binaries: (#{static_deps.flat_map(&:name).to_sentence})"
               end
             end
           end
         end
 
-        def verify_no_pods_used_with_multiple_swift_versions
-          error_message_for_target = lambda do |target|
-            "#{target.name} (Swift #{target.swift_version})"
+        def verify_swift_pods_swift_version
+          error_message_for_target_definition = lambda do |target_definition|
+            "`#{target_definition.name}` (Swift #{target_definition.swift_version})"
           end
           swift_pod_targets = pod_targets.select(&:uses_swift?)
-          error_messages = swift_pod_targets.map do |pod_target|
-            next unless pod_target.spec_swift_version.nil?
-            swift_target_definitions = pod_target.target_definitions.reject { |target| target.swift_version.blank? }
-            next if swift_target_definitions.empty? || swift_target_definitions.uniq(&:swift_version).count == 1
-            target_errors = swift_target_definitions.map(&error_message_for_target).join(', ')
-            "- #{pod_target.name} required by #{target_errors}"
+          error_messages = swift_pod_targets.map do |swift_pod_target|
+            # Legacy targets that do not specify Swift versions derive their Swift version from the target definitions
+            # they are integrated with. An error is displayed if the target definition Swift versions collide or none
+            # of target definitions specify the `SWIFT_VERSION` attribute.
+            if swift_pod_target.spec_swift_versions.empty?
+              swift_target_definitions = swift_pod_target.target_definitions.reject { |target| target.swift_version.blank? }
+              next if swift_target_definitions.uniq(&:swift_version).count == 1
+              if swift_target_definitions.empty?
+                "- `#{swift_pod_target.name}` does not specify a Swift version and none of the targets " \
+                  "(#{swift_pod_target.target_definitions.map { |td| "`#{td.name}`" }.to_sentence}) integrating it have the " \
+                  '`SWIFT_VERSION` attribute set. Please contact the author or set the `SWIFT_VERSION` attribute in at ' \
+                  'least one of the targets that integrate this pod.'
+              else
+                target_errors = swift_target_definitions.map(&error_message_for_target_definition).to_sentence
+                "- `#{swift_pod_target.name}` is integrated by multiple targets that use a different Swift version: #{target_errors}."
+              end
+            elsif swift_pod_target.swift_version.empty?
+              "- `#{swift_pod_target.name}` does not specify a Swift version (#{swift_pod_target.spec_swift_versions.map(&:to_s).join(', ')}) " \
+                "that is satisfied by any of targets (#{swift_pod_target.target_definitions.map { |td| "`#{td.name}`" }.to_sentence}) integrating it."
+            end
           end.compact
 
           unless error_messages.empty?
-            raise Informative, 'The following pods are integrated into targets ' \
-              "that do not have the same Swift version:\n\n#{error_messages.join("\n")}"
+            raise Informative, "Unable to determine Swift version for the following pods:\n\n#{error_messages.join("\n")}"
           end
         end
 
@@ -124,7 +137,7 @@ module Pod
             next if non_module_dependencies.empty?
 
             error_messages << "The Swift pod `#{pod_target.name}` depends upon #{non_module_dependencies.map { |d| "`#{d}`" }.to_sentence}, " \
-                              'which do not define modules. ' \
+                              "which #{non_module_dependencies.count == 1 ? 'does' : 'do'} not define modules. " \
                               'To opt into those targets generating module maps '\
                               '(which is necessary to import them from Swift when building as static libraries), ' \
                               'you may set `use_modular_headers!` globally in your Podfile, '\

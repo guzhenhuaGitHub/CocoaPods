@@ -44,7 +44,7 @@ module Pod
     end
 
     def self.run(argv)
-      help! 'You cannot run CocoaPods as root.' if Process.uid == 0
+      help! 'You cannot run CocoaPods as root.' if Process.uid == 0 && !Gem.win_platform?
 
       verify_minimum_git_version!
       verify_xcode_license_approved!
@@ -114,7 +114,9 @@ module Pod
     #
     def self.git_version
       raw_version = Executable.capture_command('git', ['--version']).first
-      match = raw_version.scan(/\d+\.\d+\.\d+/).first
+      unless match = raw_version.scan(/\d+\.\d+\.\d+/).first
+        raise "Failed to extract git version from `git --version` (#{raw_version.inspect})"
+      end
       Gem::Version.new(match)
     end
 

@@ -16,7 +16,7 @@ module Pod
               create_support_files_dir
               create_support_files_group
               create_xcconfig_file(native_target)
-              if target.requires_frameworks?
+              if target.host_requires_frameworks?
                 create_info_plist_file(target.info_plist_path, native_target, target.version, target.platform)
                 create_module_map(native_target)
                 create_umbrella_header(native_target)
@@ -30,11 +30,12 @@ module Pod
               # cause an App Store rejection because frameworks cannot be
               # embedded in embedded targets.
               #
-              create_embed_frameworks_script unless target.requires_host_target?
+              create_embed_frameworks_script if target.includes_frameworks? && !target.requires_host_target?
               create_bridge_support_file(native_target)
-              create_copy_resources_script
+              create_copy_resources_script if target.includes_resources?
               create_acknowledgements
               create_dummy_source(native_target)
+              clean_support_files_temp_dir
               TargetInstallationResult.new(target, native_target)
             end
           end

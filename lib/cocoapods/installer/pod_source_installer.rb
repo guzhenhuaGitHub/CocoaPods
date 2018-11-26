@@ -8,6 +8,8 @@ module Pod
     # @note This class needs to consider all the activated specs of a Pod.
     #
     class PodSourceInstaller
+      UNENCRYPTED_PROTOCOLS = %w(http git).freeze
+
       # @return [Sandbox] The installation target.
       #
       attr_reader :sandbox
@@ -63,6 +65,11 @@ module Pod
 
       # Cleans the installations if appropriate.
       #
+      # Cleaning the installation will remove any files that are not used during the build process, based on
+      # the podspec and platforms of the target that the pod is integrated into.
+      #
+      # @see {#clean_installation}
+      #
       # @return [void]
       #
       def clean!
@@ -75,9 +82,7 @@ module Pod
       #
       def lock_files!(file_accessors)
         return if local?
-        each_source_file(file_accessors) do |source_file|
-          FileUtils.chmod('u-w', source_file)
-        end
+        FileUtils.chmod('u-w', source_files(file_accessors))
       end
 
       # Unlocks the source files if appropriate.
@@ -86,9 +91,7 @@ module Pod
       #
       def unlock_files!(file_accessors)
         return if local?
-        each_source_file(file_accessors) do |source_file|
-          FileUtils.chmod('u+w', source_file)
-        end
+        FileUtils.chmod('u+w', source_files(file_accessors))
       end
 
       #-----------------------------------------------------------------------#
@@ -110,18 +113,26 @@ module Pod
         end
       end
 
-      # Verify the source of the spec is secure, which is used to
-      # show a warning to the user if that isn't the case
-      # This method doesn't verify all protocols, but currently
-      # only prohibits unencrypted http:// connections
+      # Verify the source of the spec is secure, which is used to show a warning to the user if that isn't the case
+      # This method doesn't verify all protocols, but currently only prohibits unencrypted 'http://' and 'git://''
+      # connections.
+      #
+      # @return [void]
       #
       def verify_source_is_secure(root_spec)
-        return if root_spec.source.nil? || root_spec.source[:http].nil?
-        http_source = URI(root_spec.source[:http])
-        return if http_source.scheme == 'https' || http_source.scheme == 'file'
-        UI.warn "'#{root_spec.name}' uses the unencrypted http protocol to transfer the Pod. " \
-                'Please be sure you\'re in a safe network with only trusted hosts in there. ' \
-                'Please reach out to the library author to notify them of this security issue.'
+        return if root_spec.source.nil? || (root_spec.source[:http].nil? && root_spec.source[:git].nil?)
+        source = if !root_spec.source[:http].nil?
+                   URI(root_spec.source[:http].to_s)
+                 elsif !root_spec.source[:git].nil?
+                   git_source = root_spec.source[:git].to_s
+                   return unless git_source =~ /^#{URI.regexp}$/
+                   URI(git_source)
+                 end
+        if UNENCRYPTED_PROTOCOLS.include?(source.scheme) && source.host != 'localhost'
+          UI.warn "'#{root_spec.name}' uses the unencrypted '#{source.scheme}' protocol to transfer the Pod. " \
+                'Please be sure you\'re in a safe network with only trusted hosts. ' \
+                'Otherwise, please reach out to the library author to notify them of this security issue.'
+        end
       end
 
       def download_request
@@ -130,6 +141,10 @@ module Pod
           :released => released?,
         )
       end
+
+      #-----------------------------------------------------------------------#
+
+      private
 
       # Removes all the files not needed for the installation according to the
       # specs by platform.
@@ -140,10 +155,6 @@ module Pod
         cleaner = Sandbox::PodDirCleaner.new(root, specs_by_platform)
         cleaner.clean!
       end
-
-      #-----------------------------------------------------------------------#
-
-      private
 
       # @!group Convenience methods.
 
@@ -184,13 +195,10 @@ module Pod
         !local? && !predownloaded? && sandbox.specification(root_spec.name) != root_spec
       end
 
-      def each_source_file(file_accessors, &blk)
-        file_accessors.each do |file_accessor|
-          file_accessor.source_files.each do |source_file|
-            next unless source_file.exist?
-            blk[source_file]
-          end
-        end
+      # @return [Array<Pathname>] The paths of the source files
+      #
+      def source_files(file_accessors)
+        file_accessors.flat_map(&:source_files)
       end
 
       #-----------------------------------------------------------------------#

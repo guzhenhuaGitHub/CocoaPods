@@ -37,18 +37,24 @@ module Pod
       #
       attr_reader :targets
 
+      # @return [Boolean] whether to use input/output paths for build phase scripts
+      #
+      attr_reader :use_input_output_paths
+      alias use_input_output_paths? use_input_output_paths
+
       # Init a new UserProjectIntegrator
       #
       # @param  [Podfile]  podfile @see #podfile
       # @param  [Sandbox]  sandbox @see #sandbox
       # @param  [Pathname] installation_root @see #installation_root
-      # @param  [Array<AggregateTarget>]  targets @see #targets
+      # @param  [Array<AggregateTarget>] targets @see #targets
       #
-      def initialize(podfile, sandbox, installation_root, targets)
+      def initialize(podfile, sandbox, installation_root, targets, use_input_output_paths: true)
         @podfile = podfile
         @sandbox = sandbox
         @installation_root = installation_root
         @targets = targets
+        @use_input_output_paths = use_input_output_paths
       end
 
       # Integrates the user projects associated with the {TargetDefinitions}
@@ -111,7 +117,7 @@ module Pod
       #
       def integrate_user_targets
         target_integrators = targets_to_integrate.sort_by(&:name).map do |target|
-          TargetIntegrator.new(target)
+          TargetIntegrator.new(target, :use_input_output_paths => use_input_output_paths?)
         end
 
         Config.instance.with_changes(:silent => true) do

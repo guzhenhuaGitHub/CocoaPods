@@ -1,23 +1,22 @@
 module Pod
   class Installer
     class Xcode
-      # The {PodsProjectGenerator} handles generation of the 'Pods/Pods.xcodeproj'
+      # The {PodsProjectGenerator} handles generation of CocoaPods Xcode projects.
       #
       class PodsProjectGenerator
+        require 'cocoapods/installer/xcode/pods_project_generator/target_installer_helper'
         require 'cocoapods/installer/xcode/pods_project_generator/pod_target_integrator'
         require 'cocoapods/installer/xcode/pods_project_generator/target_installer'
         require 'cocoapods/installer/xcode/pods_project_generator/target_installation_result'
         require 'cocoapods/installer/xcode/pods_project_generator/pod_target_installer'
         require 'cocoapods/installer/xcode/pods_project_generator/file_references_installer'
         require 'cocoapods/installer/xcode/pods_project_generator/aggregate_target_installer'
+        require 'cocoapods/installer/xcode/pods_project_generator/project_generator'
+        require 'cocoapods/installer/xcode/pods_project_generator_result'
 
         # @return [Sandbox] The sandbox where the Pods should be installed.
         #
         attr_reader :sandbox
-
-        # @return [Pod::Project] the `Pods/Pods.xcodeproj` project.
-        #
-        attr_reader :project
 
         # @return [Array<AggregateTarget>] The model representations of an
         #         aggregation of pod targets generated for a target definition
@@ -60,155 +59,88 @@ module Pod
           @config = config
         end
 
-        def generate!
-          prepare
-          install_file_references
-          @target_installation_results = install_libraries
-          integrate_targets(@target_installation_results.pod_target_installation_results)
-          wire_target_dependencies(@target_installation_results)
-          @target_installation_results
-        end
-
-        def write
-          UI.message "- Writing Xcode project file to #{UI.path sandbox.project_path}" do
-            project.pods.remove_from_project if project.pods.empty?
-            project.development_pods.remove_from_project if project.development_pods.empty?
-            project.sort(:groups_position => :below)
-            if installation_options.deterministic_uuids?
-              UI.message('- Generating deterministic UUIDs') { project.predictabilize_uuids }
-            end
-            library_product_types = [:framework, :dynamic_library, :static_library]
-            pod_target_installation_results = @target_installation_results.pod_target_installation_results.values
-            project.recreate_user_schemes(false) do |scheme, target|
-              next unless target.respond_to?(:symbol_type)
-              next unless library_product_types.include? target.symbol_type
-              pod_target_installation_results.each do |pod_target_installation_result|
-                next unless pod_target_installation_result.native_target == target
-                pod_target_installation_result.test_native_targets.each do |test_native_target|
-                  scheme.add_test_target(test_native_target)
-                end
-              end
-            end
-            project.save
-          end
-        end
-
         # Shares schemes of development Pods.
         #
         # @return [void]
         #
-        def share_development_pod_schemes
-          development_pod_targets.select(&:should_build?).each do |pod_target|
-            next unless share_scheme_for_development_pod?(pod_target.pod_name)
+        def share_development_pod_schemes(project, development_pod_targets = [])
+          targets = development_pod_targets.select do |target|
+            target.should_build? && share_scheme_for_development_pod?(target.pod_name)
+          end
+          targets.each do |pod_target|
             Xcodeproj::XCScheme.share_scheme(project.path, pod_target.label)
-            if pod_target.contains_test_specifications?
-              pod_target.supported_test_types.each do |test_type|
-                Xcodeproj::XCScheme.share_scheme(project.path, pod_target.test_target_label(test_type))
-              end
+            pod_target.test_specs.each do |test_spec|
+              Xcodeproj::XCScheme.share_scheme(project.path, pod_target.test_target_label(test_spec))
+            end
+
+            pod_target.app_specs.each do |app_spec|
+              Xcodeproj::XCScheme.share_scheme(project.path, pod_target.app_target_label(app_spec))
             end
           end
         end
+        # @!attribute [Hash{String => TargetInstallationResult}] pod_target_installation_results
+        # @!attribute [Hash{String => TargetInstallationResult}] aggregate_target_installation_results
+        InstallationResults = Struct.new(:pod_target_installation_results, :aggregate_target_installation_results)
 
         private
 
-        InstallationResults = Struct.new(:pod_target_installation_results, :aggregate_target_installation_results)
-
-        def create_project
-          if object_version = aggregate_targets.map(&:user_project).compact.map { |p| p.object_version.to_i }.min
-            Pod::Project.new(sandbox.project_path, false, object_version)
-          else
-            Pod::Project.new(sandbox.project_path)
+        def install_file_references(project, pod_targets)
+          UI.message "- Installing files into #{project.project_name} project" do
+            installer = FileReferencesInstaller.new(sandbox, pod_targets, project, installation_options.preserve_pod_file_structure)
+            installer.install!
           end
         end
 
-        # Creates the Pods project from scratch if it doesn't exists.
-        #
-        # @return [void]
-        #
-        # @todo   Clean and modify the project if it exists.
-        #
-        def prepare
-          UI.message '- Creating Pods project' do
-            @project = create_project
-            analysis_result.all_user_build_configurations.each do |name, type|
-              @project.add_build_configuration(name, type)
-            end
-            # Reset symroot just in case the user has added a new build configuration other than 'Debug' or 'Release'.
-            @project.symroot = Pod::Project::LEGACY_BUILD_ROOT
+        def install_pod_targets(project, pod_targets)
+          umbrella_headers_by_dir = pod_targets.map do |pod_target|
+            next unless pod_target.should_build? && pod_target.defines_module?
+            pod_target.umbrella_header_path
+          end.compact.group_by(&:dirname)
 
-            pod_names = pod_targets.map(&:pod_name).uniq
-            pod_names.each do |pod_name|
-              local = sandbox.local?(pod_name)
-              path = sandbox.pod_dir(pod_name)
-              was_absolute = sandbox.local_path_was_absolute?(pod_name)
-              @project.add_pod_group(pod_name, path, local, was_absolute)
-            end
+          pod_target_installation_results = Hash[pod_targets.sort_by(&:name).map do |pod_target|
+            umbrella_headers_in_header_dir = umbrella_headers_by_dir[pod_target.module_map_path.dirname]
+            target_installer = PodTargetInstaller.new(sandbox, project, pod_target, umbrella_headers_in_header_dir)
+            [pod_target.name, target_installer.install!]
+          end]
 
-            if config.podfile_path
-              @project.add_podfile(config.podfile_path)
-            end
-
-            sandbox.project = @project
-            platforms = aggregate_targets.map(&:platform)
-            osx_deployment_target = platforms.select { |p| p.name == :osx }.map(&:deployment_target).min
-            ios_deployment_target = platforms.select { |p| p.name == :ios }.map(&:deployment_target).min
-            watchos_deployment_target = platforms.select { |p| p.name == :watchos }.map(&:deployment_target).min
-            tvos_deployment_target = platforms.select { |p| p.name == :tvos }.map(&:deployment_target).min
-            @project.build_configurations.each do |build_configuration|
-              build_configuration.build_settings['MACOSX_DEPLOYMENT_TARGET'] = osx_deployment_target.to_s if osx_deployment_target
-              build_configuration.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = ios_deployment_target.to_s if ios_deployment_target
-              build_configuration.build_settings['WATCHOS_DEPLOYMENT_TARGET'] = watchos_deployment_target.to_s if watchos_deployment_target
-              build_configuration.build_settings['TVOS_DEPLOYMENT_TARGET'] = tvos_deployment_target.to_s if tvos_deployment_target
-              build_configuration.build_settings['STRIP_INSTALLED_PRODUCT'] = 'NO'
-              build_configuration.build_settings['CLANG_ENABLE_OBJC_ARC'] = 'YES'
-              build_configuration.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'
-              build_configuration.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
-            end
+          # Hook up system framework dependencies for the pod targets that were just installed.
+          pod_target_installation_result_values = pod_target_installation_results.values.compact
+          unless pod_target_installation_result_values.empty?
+            add_system_framework_dependencies(pod_target_installation_result_values)
           end
+
+          pod_target_installation_results
         end
 
-        def install_file_references
-          installer = FileReferencesInstaller.new(sandbox, pod_targets, project)
-          installer.install!
-        end
-
-        def install_libraries
-          UI.message '- Installing targets' do
-            umbrella_headers_by_dir = pod_targets.map do |pod_target|
-              next unless pod_target.should_build? && pod_target.defines_module?
-              pod_target.umbrella_header_path
-            end.compact.group_by(&:dirname)
-
-            pod_target_installation_results = Hash[pod_targets.sort_by(&:name).map do |pod_target|
-              target_installer = PodTargetInstaller.new(sandbox, @project, pod_target, umbrella_headers_by_dir)
-              [pod_target.name, target_installer.install!]
-            end]
-
-            # Hook up system framework dependencies for the pod targets that were just installed.
-            pod_target_installation_result_values = pod_target_installation_results.values.compact
-            unless pod_target_installation_result_values.empty?
-              add_system_framework_dependencies(pod_target_installation_result_values)
-            end
-
+        def install_aggregate_targets(project, aggregate_targets)
+          UI.message '- Installing Aggregate Targets' do
             aggregate_target_installation_results = Hash[aggregate_targets.sort_by(&:name).map do |target|
-              target_installer = AggregateTargetInstaller.new(sandbox, @project, target)
+              target_installer = AggregateTargetInstaller.new(sandbox, project, target)
               [target.name, target_installer.install!]
             end]
 
-            InstallationResults.new(pod_target_installation_results, aggregate_target_installation_results)
+            aggregate_target_installation_results
           end
         end
 
+        # @param [Hash{String => InstallationResult}] pod_target_installation_results
+        #        the installations to integrate
+        #
+        # @return [void]
+        #
         def integrate_targets(pod_target_installation_results)
           pod_installations_to_integrate = pod_target_installation_results.values.select do |pod_target_installation_result|
             pod_target = pod_target_installation_result.target
-            !pod_target_installation_result.test_native_targets.empty? || pod_target.contains_script_phases?
+            !pod_target_installation_result.test_native_targets.empty? ||
+                !pod_target_installation_result.app_native_targets.empty? ||
+                pod_target.contains_script_phases?
           end
-          unless pod_installations_to_integrate.empty?
-            UI.message '- Integrating targets' do
-              pod_installations_to_integrate.each do |pod_target_installation_result|
-                PodTargetIntegrator.new(pod_target_installation_result).integrate!
-              end
+          return if pod_installations_to_integrate.empty?
+
+          UI.message '- Integrating targets' do
+            use_input_output_paths = !installation_options.disable_input_output_paths
+            pod_installations_to_integrate.each do |pod_target_installation_result|
+              PodTargetIntegrator.new(pod_target_installation_result, :use_input_output_paths => use_input_output_paths).integrate!
             end
           end
         end
@@ -220,7 +152,7 @@ module Pod
           sorted_installation_results.each do |target_installation_result|
             pod_target = target_installation_result.target
             next unless pod_target.should_build?
-            next if !pod_target.requires_frameworks? || pod_target.static_framework?
+            next if pod_target.build_as_static?
             pod_target.file_accessors.each do |file_accessor|
               native_target = target_installation_result.native_target_for_spec(file_accessor.spec)
               add_system_frameworks_to_native_target(native_target, file_accessor)
@@ -238,7 +170,6 @@ module Pod
         # @return [void]
         #
         def wire_target_dependencies(target_installation_results)
-          frameworks_group = project.frameworks_group
           pod_target_installation_results_hash = target_installation_results.pod_target_installation_results
           aggregate_target_installation_results_hash = target_installation_results.aggregate_target_installation_results
 
@@ -266,35 +197,65 @@ module Pod
           pod_target_installation_results_hash.values.each do |pod_target_installation_result|
             pod_target = pod_target_installation_result.target
             native_target = pod_target_installation_result.native_target
+            project = native_target.project
+            frameworks_group = project.frameworks_group
             # First, wire up all resource bundles.
             pod_target_installation_result.resource_bundle_targets.each do |resource_bundle_target|
               native_target.add_dependency(resource_bundle_target)
-              if pod_target.requires_frameworks? && pod_target.should_build?
+              if pod_target.build_as_dynamic_framework? && pod_target.should_build?
                 native_target.add_resources([resource_bundle_target.product_reference])
               end
             end
             # Wire up all dependencies to this pod target, if any.
             dependent_targets = pod_target.dependent_targets
             dependent_targets.each do |dependent_target|
+              dependent_project = pod_target_installation_results_hash[dependent_target.name].native_target.project
+              if dependent_project != project
+                project.add_subproject_reference(dependent_project, project.dependencies_group)
+              end
               native_target.add_dependency(pod_target_installation_results_hash[dependent_target.name].native_target)
               add_framework_file_reference_to_native_target(native_target, pod_target, dependent_target, frameworks_group)
             end
             # Wire up test native targets.
             unless pod_target_installation_result.test_native_targets.empty?
-              test_dependent_targets = pod_target.all_dependent_targets
               pod_target_installation_result.test_specs_by_native_target.each do |test_native_target, test_specs|
+                test_dependent_targets = test_specs.flat_map { |s| pod_target.test_dependent_targets_by_spec_name[s.name] }.compact.unshift(pod_target).uniq
                 test_dependent_targets.each do |test_dependent_target|
                   dependency_installation_result = pod_target_installation_results_hash[test_dependent_target.name]
-                  dependency_installation_result.test_resource_bundle_targets.each do |test_resource_bundle_target|
-                    test_native_target.add_dependency(test_resource_bundle_target)
+                  resource_bundle_native_targets = dependency_installation_result.test_resource_bundle_targets[test_specs.first.name]
+                  unless resource_bundle_native_targets.nil?
+                    resource_bundle_native_targets.each do |test_resource_bundle_target|
+                      test_native_target.add_dependency(test_resource_bundle_target)
+                    end
+                  end
+                  dependent_test_project = pod_target_installation_results_hash[test_dependent_target.name].native_target.project
+                  if dependent_test_project != project
+                    project.add_subproject_reference(dependent_test_project, project.dependencies_group)
                   end
                   test_native_target.add_dependency(dependency_installation_result.native_target)
                   add_framework_file_reference_to_native_target(test_native_target, pod_target, test_dependent_target, frameworks_group)
-                  test_spec_consumers = test_specs.map { |test_spec| test_spec.consumer(pod_target.platform) }
-                  if test_spec_consumers.any?(&:requires_app_host?)
-                    app_host_target = project.targets.find { |t| t.name == pod_target.app_host_label(test_specs.first.test_type) }
-                    test_native_target.add_dependency(app_host_target)
+                end
+              end
+            end
+
+            # Wire up app native targets.
+            unless pod_target_installation_result.app_native_targets.empty?
+              pod_target_installation_result.app_specs_by_native_target.each do |app_native_target, app_specs|
+                app_dependent_targets = app_specs.flat_map { |s| pod_target.app_dependent_targets_by_spec_name[s.name] }.compact.unshift(pod_target).uniq
+                app_dependent_targets.each do |app_dependent_target|
+                  dependency_installation_result = pod_target_installation_results_hash[app_dependent_target.name]
+                  resource_bundle_native_targets = dependency_installation_result.app_resource_bundle_targets[app_specs.first.name]
+                  unless resource_bundle_native_targets.nil?
+                    resource_bundle_native_targets.each do |app_resource_bundle_target|
+                      app_native_target.add_dependency(app_resource_bundle_target)
+                    end
                   end
+                  dependency_project = dependency_installation_result.native_target.project
+                  if dependency_project != project
+                    project.add_subproject_reference(dependency_project, project.dependencies_group)
+                  end
+                  app_native_target.add_dependency(dependency_installation_result.native_target)
+                  add_framework_file_reference_to_native_target(app_native_target, pod_target, app_dependent_target, frameworks_group)
                 end
               end
             end
@@ -319,15 +280,6 @@ module Pod
           end
         end
 
-        # @return [Array<Library>] The targets of the development pods generated by
-        #         the installation process.
-        #
-        def development_pod_targets
-          pod_targets.select do |pod_target|
-            sandbox.local?(pod_target.pod_name)
-          end
-        end
-
         #------------------------------------------------------------------------#
 
         # @! group Private Helpers
@@ -339,7 +291,7 @@ module Pod
         end
 
         def add_framework_file_reference_to_native_target(native_target, pod_target, dependent_target, frameworks_group)
-          if pod_target.should_build? && pod_target.requires_frameworks? && !pod_target.static_framework? && dependent_target.should_build?
+          if pod_target.should_build? && pod_target.build_as_dynamic? && dependent_target.should_build?
             product_ref = frameworks_group.files.find { |f| f.path == dependent_target.product_name } ||
                 frameworks_group.new_product_ref_for_target(dependent_target.product_basename, dependent_target.product_type)
             native_target.frameworks_build_phase.add_file_reference(product_ref, true)
