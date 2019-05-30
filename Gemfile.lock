@@ -1,40 +1,40 @@
 GIT
   remote: https://github.com/CocoaPods/CLAide.git
-  revision: 989df9f0cbd9a2dc35be22aa936637f4f024973a
+  revision: 896d82a4dff73d80da565b0caa77c6ed74c9c6f8
   branch: master
   specs:
     claide (1.0.2)
 
 GIT
   remote: https://github.com/CocoaPods/Core.git
-  revision: 85d4ba5fb0b741a4ffd1ae56c2e41468685a6b64
+  revision: 1e0479d5577f1dbc78d559162c4012cbb2bb9f32
   branch: master
   specs:
-    cocoapods-core (1.6.0.beta.2)
+    cocoapods-core (1.7.0)
       activesupport (>= 4.0.2, < 6)
       fuzzy_match (~> 2.0.4)
       nap (~> 1.0)
 
 GIT
   remote: https://github.com/CocoaPods/Molinillo.git
-  revision: 0db0e4326c6927b73c998fa9a00eeeb446b25811
+  revision: 7295a34689059d33bd3ba97849f915e86b2cd8a7
   branch: master
   specs:
     molinillo (0.6.6)
 
 GIT
   remote: https://github.com/CocoaPods/Nanaimo.git
-  revision: 297484cd50feda60cdcbc303983607e622b3dba2
+  revision: 0935cf68ed21bc0b0a4b16e47cb79be7762bd16f
   branch: master
   specs:
     nanaimo (0.2.6)
 
 GIT
   remote: https://github.com/CocoaPods/Xcodeproj.git
-  revision: e0287156d426ba588c9234bb2a4c824149889860
+  revision: 4ad5b68c82f828422f677b5d1f522140952fc7e5
   branch: master
   specs:
-    xcodeproj (1.7.0)
+    xcodeproj (1.9.0)
       CFPropertyList (>= 2.3.3, < 4.0)
       atomos (~> 0.1.3)
       claide (>= 1.0.2, < 2.0)
@@ -43,10 +43,10 @@ GIT
 
 GIT
   remote: https://github.com/CocoaPods/cocoapods-deintegrate.git
-  revision: 52ddf33ae55195b8e7ea41eb6094755d0a3aacb5
+  revision: c3372a2ea2c2134db78fc6f8d157ebb9bb943a83
   branch: master
   specs:
-    cocoapods-deintegrate (1.0.2)
+    cocoapods-deintegrate (1.0.4)
 
 GIT
   remote: https://github.com/CocoaPods/cocoapods-downloader.git
@@ -57,7 +57,7 @@ GIT
 
 GIT
   remote: https://github.com/CocoaPods/cocoapods-plugins.git
-  revision: c613c92db8dbcaeae15c38de478cde9159cebe6b
+  revision: 7008b756dcfb8fdd70192a9af5ef11490ceef227
   branch: master
   specs:
     cocoapods-plugins (1.0.0)
@@ -72,14 +72,14 @@ GIT
 
 GIT
   remote: https://github.com/CocoaPods/cocoapods-stats.git
-  revision: af01b7add46aa0ca6ff35a4cf30cd87bb7f00a13
+  revision: ad869b620a46c6ba5048b54d5772e1956d2d9d83
   branch: master
   specs:
-    cocoapods-stats (1.0.0)
+    cocoapods-stats (1.1.0)
 
 GIT
   remote: https://github.com/CocoaPods/cocoapods-trunk.git
-  revision: 37db5cf0bfaac1f0692e516dc61dbd4f017b3928
+  revision: 208396fca7eeecf4b7fb2810f1a1ab3b036bd1a3
   branch: master
   specs:
     cocoapods-trunk (1.3.1)
@@ -103,11 +103,11 @@ GIT
 PATH
   remote: .
   specs:
-    cocoapods (1.6.0.beta.2)
+    cocoapods (1.7.0)
       activesupport (>= 4.0.2, < 5)
       claide (>= 1.0.2, < 2.0)
-      cocoapods-core (= 1.6.0.beta.2)
-      cocoapods-deintegrate (>= 1.0.2, < 2.0)
+      cocoapods-core (= 1.7.0)
+      cocoapods-deintegrate (>= 1.0.3, < 2.0)
       cocoapods-downloader (>= 1.2.2, < 2.0)
       cocoapods-plugins (>= 1.0.0, < 2.0)
       cocoapods-search (>= 1.0.0, < 2.0)
@@ -116,18 +116,18 @@ PATH
       cocoapods-try (>= 1.1.0, < 2.0)
       colored2 (~> 3.1)
       escape (~> 0.0.4)
-      fourflusher (~> 2.1.0)
+      fourflusher (>= 2.2.0, < 3.0)
       gh_inspector (~> 1.0)
       molinillo (~> 0.6.6)
       nap (~> 1.0)
-      ruby-macho (~> 1.3, >= 1.3.1)
-      xcodeproj (>= 1.7.0, < 2.0)
+      ruby-macho (~> 1.4)
+      xcodeproj (>= 1.8.2, < 2.0)
 
 GEM
   remote: https://rubygems.org/
   specs:
     CFPropertyList (3.0.0)
-    activesupport (4.2.10)
+    activesupport (4.2.11.1)
       i18n (~> 0.7)
       minitest (~> 5.1)
       thread_safe (~> 0.3, >= 0.3.4)
@@ -151,7 +151,7 @@ GEM
       pry (= 0.10.3)
     coderay (1.1.2)
     colored2 (3.1.2)
-    concurrent-ruby (1.0.5)
+    concurrent-ruby (1.1.5)
     cork (0.3.0)
       colored2 (~> 3.1)
     crack (0.4.3)
@@ -174,7 +174,7 @@ GEM
     faraday-http-cache (1.3.1)
       faraday (~> 0.8)
     ffi (1.9.25)
-    fourflusher (2.1.0)
+    fourflusher (2.2.0)
     fuzzy_match (2.0.4)
     gh_inspector (1.1.3)
     git (1.3.0)
@@ -235,7 +235,7 @@ GEM
       ruby-progressbar (~> 1.7)
       unicode-display_width (~> 0.3)
     ruby-graphviz (1.2.2)
-    ruby-macho (1.3.1)
+    ruby-macho (1.4.0)
     ruby-prof (0.15.2)
     ruby-progressbar (1.7.5)
     safe_yaml (1.0.4)
@@ -296,4 +296,4 @@ DEPENDENCIES
   xcodeproj!
 
 BUNDLED WITH
-   1.17.1
+   1.17.3

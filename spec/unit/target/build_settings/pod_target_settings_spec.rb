@@ -77,20 +77,20 @@ module Pod
             @xcconfig.to_hash['OTHER_LDFLAGS'].should.include('-no_compact_unwind')
           end
 
-          it 'includes the libraries for the specifications' do
+          it 'does include the system libraries for the specifications' do
             @xcconfig.to_hash['OTHER_LDFLAGS'].should.include('-l"xml2"')
           end
 
-          it 'includes the frameworks of the specifications' do
+          it 'does include the system frameworks of the specifications' do
             @xcconfig.to_hash['OTHER_LDFLAGS'].should.include('-framework "QuartzCore"')
           end
 
-          it 'includes the weak-frameworks of the specifications' do
+          it 'does include the system weak frameworks of the specifications' do
             @xcconfig.to_hash['OTHER_LDFLAGS'].should.include('-weak_framework "iAd"')
           end
 
-          it 'includes the vendored dynamic frameworks for dependency pods of the specification' do
-            @xcconfig.to_hash['OTHER_LDFLAGS'].should.include('-framework "dynamic-monkey"')
+          it 'does not include the vendored dynamic frameworks for dependency pods of the specification' do
+            @xcconfig.to_hash['OTHER_LDFLAGS'].should.not.include('-framework "dynamic-monkey"')
           end
 
           it 'does not include vendored static frameworks for dependency pods of the specification' do
@@ -222,7 +222,7 @@ module Pod
             @generator.spec_consumers.each { |sc| sc.stubs(:frameworks => []) }
             @generator.stubs(:dependent_targets => [pod_target])
             @generator.other_ldflags.should.
-              be == %w(-l"Bananalib" -l"VendoredDyld" -l"xml2" -framework "Bananalib" -framework "VendoredFramework" -framework "XCTest" -weak_framework "iAd")
+              be == %w(-l"BananaStaticLib" -l"xml2" -framework "BananaFramework" -weak_framework "iAd")
           end
         end
 
@@ -243,19 +243,21 @@ module Pod
           end
 
           it 'does not merge pod target xcconfig of test specifications for a non test xcconfig' do
-            @coconut_spec.pod_target_xcconfig = { 'GCC_PREPROCESSOR_DEFINITIONS' => 'NON_TEST_FLAG=1' }
-            @coconut_test_spec.pod_target_xcconfig = { 'GCC_PREPROCESSOR_DEFINITIONS' => 'TEST_ONLY=1' }
+            @coconut_spec.pod_target_xcconfig = { 'GCC_PREPROCESSOR_DEFINITIONS' => 'NON_TEST_FLAG=1', 'PODS_ROOT' => 'OVERRIDDEN' }
+            @coconut_test_spec.pod_target_xcconfig = { 'GCC_PREPROCESSOR_DEFINITIONS' => 'TEST_ONLY=1', 'PODS_ROOT' => 'OVERRIDDEN2' }
             generator = PodTargetSettings.new(@coconut_pod_target)
             xcconfig = generator.generate
             xcconfig.to_hash['GCC_PREPROCESSOR_DEFINITIONS'].should == '$(inherited) COCOAPODS=1 NON_TEST_FLAG=1'
+            xcconfig.to_hash['PODS_ROOT'].should == 'OVERRIDDEN'
           end
 
           it 'merges pod target xcconfig settings from subspecs' do
-            @matryoshka_spec.subspecs[0].pod_target_xcconfig = { 'GCC_PREPROCESSOR_DEFINITIONS' => 'FIRST_SUBSPEC_FLAG=1' }
+            @matryoshka_spec.subspecs[0].pod_target_xcconfig = { 'GCC_PREPROCESSOR_DEFINITIONS' => 'FIRST_SUBSPEC_FLAG=1', 'PODS_ROOT' => 'OVERRIDDEN' }
             @matryoshka_spec.subspecs[1].pod_target_xcconfig = { 'GCC_PREPROCESSOR_DEFINITIONS' => 'SECOND_SUBSPEC_FLAG=1' }
             generator = PodTargetSettings.new(@matryoshka_pod_target)
             xcconfig = generator.generate
             xcconfig.to_hash['GCC_PREPROCESSOR_DEFINITIONS'].should == '$(inherited) COCOAPODS=1 FIRST_SUBSPEC_FLAG=1 SECOND_SUBSPEC_FLAG=1'
+            xcconfig.to_hash['PODS_ROOT'].should == 'OVERRIDDEN'
           end
 
           it 'merges the pod target xcconfig of non test specifications for test xcconfigs' do

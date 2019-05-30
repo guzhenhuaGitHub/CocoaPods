@@ -32,9 +32,10 @@ module Pod
               'Multiple platforms must be comma-delimited'],
             ['--private', 'Lint skips checks that apply only to public specs'],
             ['--swift-version=VERSION', 'The SWIFT_VERSION that should be used to lint the spec. ' \
-             'This takes precedence over a .swift-version file.'],
+             'This takes precedence over the Swift versions specified by the spec or a `.swift-version` file.'],
             ['--skip-import-validation', 'Lint skips validating that the pod can be imported'],
             ['--skip-tests', 'Lint skips building and running tests during validation'],
+            ['--analyze', 'Validate with the Xcode Static Analysis tool'],
           ].concat(super)
         end
 
@@ -53,6 +54,7 @@ module Pod
           @swift_version   = argv.option('swift-version', nil)
           @skip_import_validation = argv.flag?('skip-import-validation', false)
           @skip_tests = argv.flag?('skip-tests', false)
+          @analyze = argv.flag?('analyze', false)
           @podspecs_paths = argv.arguments!
           super
         end
@@ -74,6 +76,7 @@ module Pod
             validator.swift_version = @swift_version
             validator.skip_import_validation = @skip_import_validation
             validator.skip_tests = @skip_tests
+            validator.analyze = @analyze
             validator.validate
             failure_reasons << validator.failure_reason
 

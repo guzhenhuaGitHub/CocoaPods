@@ -42,9 +42,9 @@ module Pod
 
         def verify_no_duplicate_framework_and_library_names
           aggregate_targets.each do |aggregate_target|
-            aggregate_target.user_build_configurations.keys.each do |config|
+            aggregate_target.user_build_configurations.each_key do |config|
               pod_targets = aggregate_target.pod_targets_for_build_configuration(config)
-              file_accessors = pod_targets.flat_map(&:file_accessors)
+              file_accessors = pod_targets.flat_map(&:file_accessors).select { |fa| fa.spec.library_specification? }
 
               frameworks = file_accessors.flat_map(&:vendored_frameworks).uniq.map(&:basename)
               frameworks += pod_targets.select { |pt| pt.should_build? && pt.build_as_framework? }.map(&:product_module_name).uniq
@@ -58,7 +58,7 @@ module Pod
         end
 
         def verify_no_duplicate_names(names, label, type)
-          duplicates = names.map { |n| n.to_s.downcase }.group_by { |f| f }.select { |_, v| v.size > 1 }.keys
+          duplicates = names.group_by { |n| n.to_s.downcase }.select { |_, v| v.size > 1 }.keys
 
           unless duplicates.empty?
             raise Informative, "The '#{label}' target has " \
@@ -73,8 +73,8 @@ module Pod
               built_targets, unbuilt_targets = pod_targets.partition(&:should_build?)
               dynamic_pod_targets = built_targets.select(&:build_as_dynamic?)
 
-              dependencies = dynamic_pod_targets.flat_map(&:dependencies)
-              depended_upon_targets = unbuilt_targets.select { |t| dependencies.include?(t.pod_name) }
+              dependencies = dynamic_pod_targets.flat_map(&:dependent_targets).uniq
+              depended_upon_targets = unbuilt_targets & dependencies
 
               static_libs = depended_upon_targets.flat_map(&:file_accessors).flat_map(&:vendored_static_artifacts)
               unless static_libs.empty?
@@ -82,7 +82,7 @@ module Pod
                   "transitive dependencies that include statically linked binaries: (#{static_libs.to_sentence})"
               end
 
-              static_deps = dynamic_pod_targets.flat_map(&:recursive_dependent_targets).select(&:build_as_static?).uniq
+              static_deps = dynamic_pod_targets.flat_map(&:recursive_dependent_targets).uniq.select(&:build_as_static?)
               unless static_deps.empty?
                 raise Informative, "The '#{aggregate_target.label}' target has " \
                   "transitive dependencies that include statically linked binaries: (#{static_deps.flat_map(&:name).to_sentence})"
@@ -113,7 +113,7 @@ module Pod
                 "- `#{swift_pod_target.name}` is integrated by multiple targets that use a different Swift version: #{target_errors}."
               end
             elsif swift_pod_target.swift_version.empty?
-              "- `#{swift_pod_target.name}` does not specify a Swift version (#{swift_pod_target.spec_swift_versions.map(&:to_s).join(', ')}) " \
+              "- `#{swift_pod_target.name}` does not specify a Swift version (#{swift_pod_target.spec_swift_versions.map { |v| "`#{v}`" }.to_sentence}) " \
                 "that is satisfied by any of targets (#{swift_pod_target.target_definitions.map { |td| "`#{td.name}`" }.to_sentence}) integrating it."
             end
           end.compact

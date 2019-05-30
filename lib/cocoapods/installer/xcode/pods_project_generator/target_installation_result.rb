@@ -58,10 +58,12 @@ module Pod
           # @param [Array<PBXNativeTarget>] test_native_targets @see #test_native_targets
           # @param [Hash{String=>Array<PBXNativeTarget>}] test_resource_bundle_targets @see #test_resource_bundle_targets
           # @param [Array<PBXNativeTarget>] test_app_host_targets @see #test_app_host_targets
+          # @param [Array<PBXNativeTarget>] app_native_targets @see #app_native_targets
+          # @param [Hash{String=>Array<PBXNativeTarget>}] app_resource_bundle_targets @see #app_resource_bundle_targets
           #
           def initialize(target, native_target, resource_bundle_targets = [], test_native_targets = [],
                          test_resource_bundle_targets = {}, test_app_host_targets = [],
-                         app_native_targets = [], app_resource_bundle_targets = [])
+                         app_native_targets = [], app_resource_bundle_targets = {})
             @target = target
             @native_target = native_target
             @resource_bundle_targets = resource_bundle_targets
@@ -86,30 +88,38 @@ module Pod
           end
 
           # @return [Hash{PBXNativeTarget => Specification}] a hash where the keys are the test native targets and the value
-          #         an array of all the test specs associated with this native target.
+          #         is the test spec associated with this native target.
           #
           def test_specs_by_native_target
-            test_specs_by_native_target = target.test_specs.group_by do |test_spec|
-              test_native_target_from_spec(test_spec)
-            end
+            test_specs_by_native_target = Hash[target.test_specs.map { |spec| [test_native_target_from_spec(spec), spec] }]
             test_specs_by_native_target.delete_if { |k, _| k.nil? }
           end
 
           # @return [Hash{PBXNativeTarget => Specification}] a hash where the keys are the app native targets and the value
-          #         an array of all the app specs associated with this native target.
+          #         is the app spec associated with this native target.
           #
           def app_specs_by_native_target
-            app_specs_by_native_target = target.app_specs.group_by do |app_spec|
-              app_native_target_from_spec(app_spec)
-            end
+            app_specs_by_native_target = Hash[target.app_specs.map { |spec| [app_native_target_from_spec(spec), spec] }]
             app_specs_by_native_target.delete_if { |k, _| k.nil? }
           end
 
           # @return [Hash{PBXNativeTarget => Specification}] a hash where the keys are the native targets and the value
-          #         an array of all the non-library specs associated with this native target.
+          #         is the non-library spec associated with this native target.
           #
           def non_library_specs_by_native_target
             test_specs_by_native_target.merge(app_specs_by_native_target)
+          end
+
+          # @param label [String] the label of the app host target.
+          #
+          # @return [PBXNativeTarget] the app host target with the given target label.
+          #
+          def app_host_target_labelled(label)
+            app_native_targets.find do |app_native_target|
+              app_native_target.name == label
+            end || test_app_host_targets.find do |app_native_target|
+              app_native_target.name == label
+            end
           end
 
           private

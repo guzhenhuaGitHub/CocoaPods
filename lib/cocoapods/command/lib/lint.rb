@@ -8,6 +8,10 @@ module Pod
           Validates the Pod using the files in the working directory.
         DESC
 
+        self.arguments = [
+          CLAide::Argument.new('PODSPEC_PATHS', false, true),
+        ]
+
         def self.options
           [
             ['--quick', 'Lint skips checks that would require to download and build the spec'],
@@ -26,27 +30,34 @@ module Pod
               'Multiple platforms must be comma-delimited'],
             ['--private', 'Lint skips checks that apply only to public specs'],
             ['--swift-version=VERSION', 'The SWIFT_VERSION that should be used to lint the spec. ' \
-             'This takes precedence over a .swift-version file.'],
+             'This takes precedence over the Swift versions specified by the spec or a `.swift-version` file.'],
+            ['--include-podspecs=**/*.podspec', 'Additional ancillary podspecs which are used for linting via :path.'],
+            ['--external-podspecs=**/*.podspec', 'Additional ancillary podspecs which are used for linting '\
+              'via :podspec. If there are --include-podspecs, then these are removed from them.'],
             ['--skip-import-validation', 'Lint skips validating that the pod can be imported'],
             ['--skip-tests', 'Lint skips building and running tests during validation'],
+            ['--analyze', 'Validate with the Xcode Static Analysis tool'],
           ].concat(super)
         end
 
         def initialize(argv)
-          @quick           = argv.flag?('quick')
-          @allow_warnings  = argv.flag?('allow-warnings')
-          @clean           = argv.flag?('clean', true)
-          @fail_fast       = argv.flag?('fail-fast', false)
-          @subspecs        = argv.flag?('subspecs', true)
-          @only_subspec    = argv.option('subspec')
-          @use_frameworks  = !argv.flag?('use-libraries')
+          @quick               = argv.flag?('quick')
+          @allow_warnings      = argv.flag?('allow-warnings')
+          @clean               = argv.flag?('clean', true)
+          @fail_fast           = argv.flag?('fail-fast', false)
+          @subspecs            = argv.flag?('subspecs', true)
+          @only_subspec        = argv.option('subspec')
+          @use_frameworks      = !argv.flag?('use-libraries')
           @use_modular_headers = argv.flag?('use-modular-headers')
-          @source_urls     = argv.option('sources', 'https://github.com/CocoaPods/Specs.git').split(',')
-          @platforms       = argv.option('platforms', '').split(',')
-          @private         = argv.flag?('private', false)
-          @swift_version   = argv.option('swift-version', nil)
+          @source_urls         = argv.option('sources', 'https://github.com/CocoaPods/Specs.git').split(',')
+          @platforms           = argv.option('platforms', '').split(',')
+          @private             = argv.flag?('private', false)
+          @swift_version       = argv.option('swift-version', nil)
+          @include_podspecs    = argv.option('include-podspecs', nil)
+          @external_podspecs   = argv.option('external-podspecs', nil)
           @skip_import_validation = argv.flag?('skip-import-validation', false)
           @skip_tests = argv.flag?('skip-tests', false)
+          @analyze = argv.flag?('analyze', false)
           @podspecs_paths = argv.arguments!
           super
         end
@@ -72,6 +83,9 @@ module Pod
             validator.swift_version = @swift_version
             validator.skip_import_validation = @skip_import_validation
             validator.skip_tests = @skip_tests
+            validator.analyze = @analyze
+            validator.include_podspecs = @include_podspecs
+            validator.external_podspecs = @external_podspecs
             validator.validate
 
             unless @clean

@@ -21,8 +21,13 @@ module Pod
           previous_title_level = UI.title_level
           UI.title_level = 0
           begin
-            if name =~ /^master(-\d+)?$/
+            case
+            when name =~ /^master(-\d+)?$/
               Command::Setup.parse([]).run
+            when url =~ /\.git$/
+              Command::Repo::Add.parse([name, url]).run
+            when url =~ %r{^https:\/\/}
+              Command::Repo::AddCDN.parse([name, url]).run
             else
               Command::Repo::Add.parse([name, url]).run
             end
@@ -83,11 +88,16 @@ module Pod
         end
 
         changed_spec_paths = {}
-        sources.each do |source|
-          UI.section "Updating spec repo `#{source.name}`" do
-            changed_source_paths = source.update(show_output)
-            changed_spec_paths[source] = changed_source_paths if changed_source_paths.count > 0
-            source.verify_compatibility!
+        # Ceate the Spec_Lock file if needed and lock it so that concurrent
+        # repo updates do not cause each other to fail
+        File.open("#{Config.instance.repos_dir}/Spec_Lock", File::CREAT) do |f|
+          f.flock(File::LOCK_EX)
+          sources.each do |source|
+            UI.section "Updating spec repo `#{source.name}`" do
+              changed_source_paths = source.update(show_output)
+              changed_spec_paths[source] = changed_source_paths if changed_source_paths.count > 0
+              source.verify_compatibility!
+            end
           end
         end
         # Perform search index update operation in background.
@@ -98,8 +108,16 @@ module Pod
     extend Executable
     executable :git
 
-    def git(args, include_error: false)
-      Executable.capture_command('git', args, :capture => include_error ? :merge : :out).first.strip
+    def repo_git(args, include_error: false)
+      Executable.capture_command('git', ['-C', repo] + args,
+                                 :capture => include_error ? :merge : :out,
+                                 :env => {
+                                   'GIT_CONFIG' => nil,
+                                   'GIT_DIR' => nil,
+                                   'GIT_WORK_TREE' => nil,
+                                 }
+                                ).
+        first.strip
     end
 
     def update_git_repo(show_output = false)

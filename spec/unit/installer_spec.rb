@@ -62,12 +62,17 @@ module Pod
         @installer.stubs(:resolve_dependencies)
         @installer.stubs(:download_dependencies)
         @installer.stubs(:validate_targets)
+        @installer.stubs(:stage_sandbox)
+        @installer.stubs(:clean_sandbox)
         @installer.stubs(:generate_pods_project)
         @installer.stubs(:integrate_user_project)
         @installer.stubs(:run_plugins_post_install_hooks)
         @installer.stubs(:ensure_plugins_are_installed!)
         @installer.stubs(:perform_post_install_actions)
-        Installer::Xcode::PodsProjectGenerator.any_instance.stubs(:share_development_pod_schemes)
+        @installer.stubs(:predictabilize_uuids)
+        @installer.stubs(:stabilize_target_uuids)
+
+        Installer::Xcode::PodsProjectGenerator.any_instance.stubs(:configure_schemes)
         Installer::Xcode::SinglePodsProjectGenerator.any_instance.stubs(:generate!)
         Installer::Xcode::PodsProjectWriter.any_instance.stubs(:write!)
       end
@@ -90,19 +95,115 @@ module Pod
         @installer.stubs(:write_lockfiles)
         @installer.stubs(:aggregate_targets).returns([])
         @installer.stubs(:pod_targets).returns([])
+        analysis_result = Installer::Analyzer::AnalysisResult.new(Pod::Installer::Analyzer::SpecsState.new, {}, {},
+                                                                  [], Pod::Installer::Analyzer::SpecsState.new, [], [],
+                                                                  Installer::Analyzer::PodfileDependencyCache.from_podfile(@installer.podfile))
+        @installer.stubs(:analysis_result).returns(analysis_result)
         @installer.unstub(:generate_pods_project)
-        generator = @installer.send(:create_generator, false)
+        generator = @installer.send(:create_generator, [], [], {}, '')
         @installer.stubs(:create_generator).returns(generator)
         target_installation_results = Installer::Xcode::PodsProjectGenerator::InstallationResults.new({}, {})
         generator_result = Installer::Xcode::PodsProjectGenerator::PodsProjectGeneratorResult.new(nil, {}, target_installation_results)
         generator.stubs(:generate!).returns(generator_result)
-        generator.stubs(:share_development_pod_schemes)
+        generator.stubs(:configure_schemes)
 
         hooks = sequence('hooks')
         @installer.expects(:run_podfile_post_install_hooks).once.in_sequence(hooks)
         Installer::Xcode::PodsProjectWriter.any_instance.expects(:write!).once.in_sequence(hooks)
 
         @installer.install!
+      end
+
+      it 'injects all generated projects into #share_development_pod_schemes for single project generation' do
+        @installer.unstub(:generate_pods_project)
+        Installer::SandboxDirCleaner.any_instance.stubs(:clean!)
+        @installer.stubs(:pod_targets).returns([])
+        @installer.stubs(:aggregate_targets).returns([])
+
+        analysis_result = Installer::Analyzer::AnalysisResult.new(Pod::Installer::Analyzer::SpecsState.new, {}, {},
+                                                                  [], Pod::Installer::Analyzer::SpecsState.new, [], [],
+                                                                  Installer::Analyzer::PodfileDependencyCache.from_podfile(@installer.podfile))
+        @installer.stubs(:analysis_result).returns(analysis_result)
+
+        generator = @installer.send(:create_generator, [], [], {}, '')
+        @installer.stubs(:create_generator).returns(generator)
+
+        target_installation_results = Installer::Xcode::PodsProjectGenerator::InstallationResults.new({}, {})
+        pods_project = fixture('Pods.xcodeproj')
+        generator_result = Installer::Xcode::PodsProjectGenerator::PodsProjectGeneratorResult.new(pods_project, {}, target_installation_results)
+        generator.stubs(:generate!).returns(generator_result)
+        generator.expects(:configure_schemes).once
+
+        @installer.install!
+      end
+
+      it 'injects all generated projects into #share_development_pod_schemes for multi project generation' do
+        @installer.unstub(:generate_pods_project)
+        Installer::SandboxDirCleaner.any_instance.stubs(:clean!)
+
+        @installer.stubs(:pod_targets).returns([])
+        @installer.stubs(:aggregate_targets).returns([])
+
+        analysis_result = Installer::Analyzer::AnalysisResult.new(Pod::Installer::Analyzer::SpecsState.new, {}, {},
+                                                                  [], Pod::Installer::Analyzer::SpecsState.new, [], [],
+                                                                  Installer::Analyzer::PodfileDependencyCache.from_podfile(@installer.podfile))
+        @installer.stubs(:analysis_result).returns(analysis_result)
+
+        generator = @installer.send(:create_generator, @pod_targets, [], {}, '', true)
+        @installer.stubs(:create_generator).returns(generator)
+
+        target_installation_results = Installer::Xcode::PodsProjectGenerator::InstallationResults.new({}, {})
+        pods_project = fixture('Pods.xcodeproj')
+        projects_by_pod_targets = { fixture('Subproject.xcodeproj') => [] }
+        generator_result = Installer::Xcode::PodsProjectGenerator::PodsProjectGeneratorResult.new(pods_project, projects_by_pod_targets, target_installation_results)
+        generator.stubs(:generate!).returns(generator_result)
+        generator.expects(:configure_schemes).twice
+
+        @installer.install!
+      end
+
+      describe 'UUID handling' do
+        before do
+          @installer.unstub(:generate_pods_project)
+          Installer::SandboxDirCleaner.any_instance.stubs(:clean!)
+          @installer.stubs(:pod_targets).returns([])
+          @installer.stubs(:aggregate_targets).returns([])
+
+          analysis_result = Installer::Analyzer::AnalysisResult.new(Pod::Installer::Analyzer::SpecsState.new, {}, {},
+                                                                    [], Pod::Installer::Analyzer::SpecsState.new, [], [],
+                                                                    Installer::Analyzer::PodfileDependencyCache.from_podfile(@installer.podfile))
+          @installer.stubs(:analysis_result).returns(analysis_result)
+
+          generator = @installer.send(:create_generator, [], [], {}, '')
+          @installer.stubs(:create_generator).returns(generator)
+
+          target_installation_results = Installer::Xcode::PodsProjectGenerator::InstallationResults.new({}, {})
+          pods_project = fixture('Pods.xcodeproj')
+          generator_result = Installer::Xcode::PodsProjectGenerator::PodsProjectGeneratorResult.new(pods_project, {}, target_installation_results)
+          generator.stubs(:generate!).returns(generator_result)
+        end
+
+        it 'predictabilizes UUIDs if the corresponding config is true' do
+          @installer.stubs(:installation_options).returns(Pod::Installer::InstallationOptions.new)
+          @installer.expects(:predictabilize_uuids).with([fixture('Pods.xcodeproj')]).once
+
+          @installer.install!
+        end
+
+        it "doesn't predictabilize UUIDs if the corresponding config is false" do
+          @installer.stubs(:installation_options).returns(Pod::Installer::InstallationOptions.new(:deterministic_uuids => false))
+          @installer.expects(:create_and_save_projects).once
+          @installer.expects(:predictabilize_uuids).never
+
+          @installer.install!
+        end
+
+        it 'stabilizes target UUIDs' do
+          @installer.stubs(:installation_options).returns(Pod::Installer::InstallationOptions.new)
+          @installer.expects(:stabilize_target_uuids).with([fixture('Pods.xcodeproj')]).once
+
+          @installer.install!
+        end
       end
 
       describe 'handling spec sources' do
@@ -366,9 +467,12 @@ module Pod
           @analysis_result = Installer::Analyzer::AnalysisResult.new(Pod::Installer::Analyzer::SpecsState.new, {}, {},
                                                                      [], Pod::Installer::Analyzer::SpecsState.new, [], [],
                                                                      Installer::Analyzer::PodfileDependencyCache.from_podfile(@installer.podfile))
-          @spec = stub(:name => 'Spec', :test_specification? => false, :library_specification? => true, :app_specification? => false)
+          @consumer = stub(:header_dir => 'myDir')
+          @spec = stub(:name => 'Spec', :test_specification? => false, :library_specification? => true, :non_library_specification? => false,
+                       :app_specification? => false, :consumer => @consumer)
           @spec.stubs(:root => @spec)
           @spec.stubs(:spec_type).returns(:library)
+          @spec.stubs(:module_name => 'Spec')
           @pod_targets = [PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [@spec],
                                         [fixture_target_definition], nil)]
           @installer.stubs(:analysis_result).returns(@analysis_result)
@@ -378,72 +482,18 @@ module Pod
 
         it 'cleans the header stores' do
           FileUtils.mkdir_p(config.sandbox.target_support_files_root)
-          config.sandbox.public_headers.expects(:implode!)
           @installer.pod_targets.each do |pods_target|
-            pods_target.build_headers.expects(:implode!)
+            pods_target.build_headers.expects(:implode_path!)
+            config.sandbox.public_headers.expects(:implode_path!).with(pods_target.headers_sandbox)
           end
-          @installer.send(:clean_sandbox)
+          @installer.send(:clean_sandbox, @installer.pod_targets)
         end
 
         it 'deletes the sources of the removed Pods' do
           FileUtils.mkdir_p(config.sandbox.target_support_files_root)
           @analysis_result.sandbox_state.add_name('Deleted-Pod', :deleted)
           config.sandbox.expects(:clean_pod).with('Deleted-Pod')
-          @installer.send(:clean_sandbox)
-        end
-
-        it 'deletes the target support file dirs of the removed pod targets' do
-          FileUtils.mkdir_p(config.sandbox.target_support_files_root)
-          FileUtils.mkdir_p(@installer.pod_targets.first.support_files_dir)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should == [
-            'Spec',
-          ]
-          @installer.stubs(:pod_targets).returns([])
-          @installer.send(:clean_sandbox)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should.be.empty
-        end
-
-        it 'does not delete the target support file dirs for non removed pod targets' do
-          FileUtils.mkdir_p(config.sandbox.target_support_files_root)
-          FileUtils.mkdir_p(@installer.pod_targets.first.support_files_dir)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should == [
-            'Spec',
-          ]
-          @installer.send(:clean_sandbox)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should == [
-            'Spec',
-          ]
-        end
-
-        it 'deletes the target support file dirs of the removed aggregate targets' do
-          aggregate_target = AggregateTarget.new(config.sandbox, false, {}, [], Platform.ios,
-                                                 fixture_target_definition('MyApp'), config.sandbox.root.dirname, nil,
-                                                 nil, {})
-          @installer.stubs(:aggregate_targets).returns([aggregate_target])
-          FileUtils.mkdir_p(config.sandbox.target_support_files_root)
-          FileUtils.mkdir_p(@installer.aggregate_targets.first.support_files_dir)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should == [
-            'Pods-MyApp',
-          ]
-          @installer.stubs(:aggregate_targets).returns([])
-          @installer.send(:clean_sandbox)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should.be.empty
-        end
-
-        it 'does not delete the target support file dirs for non removed aggregate targets' do
-          aggregate_target = AggregateTarget.new(config.sandbox, false, {}, [], Platform.ios,
-                                                 fixture_target_definition('MyApp'), config.sandbox.root.dirname, nil,
-                                                 nil, {})
-          @installer.stubs(:aggregate_targets).returns([aggregate_target])
-          FileUtils.mkdir_p(config.sandbox.target_support_files_root)
-          FileUtils.mkdir_p(@installer.aggregate_targets.first.support_files_dir)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should == [
-            'Pods-MyApp',
-          ]
-          @installer.send(:clean_sandbox)
-          config.sandbox.target_support_files_root.children.map(&:basename).map(&:to_s).should == [
-            'Pods-MyApp',
-          ]
+          @installer.send(:clean_sandbox, @installer.pod_targets)
         end
       end
     end

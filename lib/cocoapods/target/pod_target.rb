@@ -58,6 +58,18 @@ module Pod
     #
     attr_accessor :app_dependent_targets_by_spec_name
 
+    # @return [Hash{String => (Specification,PodTarget)}] tuples of app specs and pod targets by test spec name.
+    #
+    attr_accessor :test_app_hosts_by_spec_name
+
+    # @return [Hash{String => BuildSettings}] the test spec build settings for this target.
+    #
+    attr_reader :test_spec_build_settings
+
+    # @return [Hash{String => BuildSettings}] the app spec build settings for this target.
+    #
+    attr_reader :app_spec_build_settings
+
     # Initialize a new instance
     #
     # @param [Sandbox] sandbox @see Target#sandbox
@@ -77,7 +89,6 @@ module Pod
       super(sandbox, host_requires_frameworks, user_build_configurations, archs, platform, :build_type => build_type)
       raise "Can't initialize a PodTarget without specs!" if specs.nil? || specs.empty?
       raise "Can't initialize a PodTarget without TargetDefinition!" if target_definitions.nil? || target_definitions.empty?
-      raise "Can't initialize a PodTarget with only abstract TargetDefinitions!" if target_definitions.all?(&:abstract?)
       raise "Can't initialize a PodTarget with an empty string scope suffix!" if scope_suffix == ''
       @specs = specs.dup.freeze
       @target_definitions = target_definitions
@@ -91,7 +102,10 @@ module Pod
       @dependent_targets = []
       @test_dependent_targets_by_spec_name = {}
       @app_dependent_targets_by_spec_name = {}
+      @test_app_hosts_by_spec_name = {}
       @build_config_cache = {}
+      @test_spec_build_settings = create_test_build_settings
+      @app_spec_build_settings = create_app_build_settings
     end
 
     # Scopes the current target based on the existing pod targets within the cache.
@@ -104,19 +118,26 @@ module Pod
     def scoped(cache = {})
       target_definitions.map do |target_definition|
         cache_key = [specs, target_definition]
-        if cache[cache_key]
-          cache[cache_key]
-        else
+        cache[cache_key] ||= begin
           target = PodTarget.new(sandbox, host_requires_frameworks, user_build_configurations, archs, platform, specs, [target_definition], file_accessors, target_definition.label,
                                  :build_type => build_type)
-          target.dependent_targets = dependent_targets.flat_map { |pt| pt.scoped(cache) }.select { |pt| pt.target_definitions == [target_definition] }
-          target.test_dependent_targets_by_spec_name = Hash[test_dependent_targets_by_spec_name.map do |spec_name, test_pod_targets|
-            scoped_test_pod_targets = test_pod_targets.flat_map do |test_pod_target|
-              test_pod_target.scoped(cache).select { |pt| pt.target_definitions == [target_definition] }
+          scope_dependent_targets = ->(dependent_targets) do
+            dependent_targets.flat_map do |pod_target|
+              pod_target.scoped(cache).select { |pt| pt.target_definitions == [target_definition] }
             end
-            [spec_name, scoped_test_pod_targets]
+          end
+
+          target.dependent_targets = scope_dependent_targets[dependent_targets]
+          target.test_dependent_targets_by_spec_name = Hash[test_dependent_targets_by_spec_name.map do |spec_name, test_pod_targets|
+            [spec_name, scope_dependent_targets[test_pod_targets]]
           end]
-          cache[cache_key] = target
+          target.app_dependent_targets_by_spec_name = Hash[app_dependent_targets_by_spec_name.map do |spec_name, app_pod_targets|
+            [spec_name, scope_dependent_targets[app_pod_targets]]
+          end]
+          target.test_app_hosts_by_spec_name = Hash[test_app_hosts_by_spec_name.map do |spec_name, (app_host_spec, app_pod_target)|
+            [spec_name, [app_host_spec, app_pod_target.scoped(cache).find { |pt| pt.target_definitions == [target_definition] }]]
+          end]
+          target
         end
       end
     end
@@ -129,6 +150,40 @@ module Pod
       else
         "#{root_spec.name}-#{scope_suffix}"
       end
+    end
+
+    # @return [Array<FileAccessor>] The list of all files tracked.
+    #
+    def all_files
+      Sandbox::FileAccessor.all_files(file_accessors)
+    end
+
+    # @return [Pathname] the pathname for headers in the sandbox.
+    #
+    def headers_sandbox
+      Pathname.new(pod_name)
+    end
+
+    # @return [Hash{FileAccessor => Hash}] Hash of file accessors by header mappings.
+    #
+    def header_mappings_by_file_accessor
+      valid_accessors = file_accessors.reject { |fa| fa.spec.non_library_specification? }
+      Hash[valid_accessors.map do |file_accessor|
+        # Private headers will always end up in Pods/Headers/Private/PodA/*.h
+        # This will allow for `""` imports to work.
+        [file_accessor, header_mappings(file_accessor, file_accessor.headers)]
+      end]
+    end
+
+    # @return [Hash{FileAccessor => Hash}] Hash of file accessors by public header mappings.
+    #
+    def public_header_mappings_by_file_accessor
+      valid_accessors = file_accessors.reject { |fa| fa.spec.non_library_specification? }
+      Hash[valid_accessors.map do |file_accessor|
+        # Public headers on the other hand will be added in Pods/Headers/Public/PodA/PodA/*.h
+        # The extra folder is intentional in order for `<>` imports to work.
+        [file_accessor, header_mappings(file_accessor, file_accessor.public_headers)]
+      end]
     end
 
     # @return [String] the Swift version for the target. If the pod author has provided a set of Swift versions
@@ -204,31 +259,31 @@ module Pod
       app_specs.map { |app_spec| app_spec.consumer(platform) }
     end
 
-    # @return [Boolean] Whether the target uses Swift code. This excludes source files from test specs.
+    # @return [Boolean] Whether the target uses Swift code. This excludes source files from non library specs.
     #
     def uses_swift?
       return @uses_swift if defined? @uses_swift
       @uses_swift = begin
         file_accessors.select { |a| a.spec.library_specification? }.any? do |file_accessor|
-          file_accessor.source_files.any? { |sf| sf.extname == '.swift' }
+          uses_swift_for_spec?(file_accessor.spec)
         end
       end
     end
 
-    # Checks whether a non library specification uses Swift or not.
+    # Checks whether a specification uses Swift or not.
     #
-    # @param  [Specification] non_library_spec
-    #         The non library spec to query against.
+    # @param  [Specification] spec
+    #         The spec to query against.
     #
     # @return [Boolean] Whether the target uses Swift code within the requested non library spec.
     #
-    def uses_swift_for_non_library_spec?(non_library_spec)
-      @uses_swift_for_non_library_type ||= {}
-      return @uses_swift_for_non_library_type[non_library_spec.name] if @uses_swift_for_non_library_type.key?(non_library_spec.name)
-      @uses_swift_for_non_library_type[non_library_spec.name] = begin
-        file_accessors.select { |a| a.spec.non_library_specification? && a.spec == non_library_spec }.any? do |file_accessor|
-          file_accessor.source_files.any? { |sf| sf.extname == '.swift' }
-        end
+    def uses_swift_for_spec?(spec)
+      @uses_swift_for_spec_cache ||= {}
+      return @uses_swift_for_spec_cache[spec.name] if @uses_swift_for_spec_cache.key?(spec.name)
+      @uses_swift_for_spec_cache[spec.name] = begin
+        file_accessor = file_accessors.find { |fa| fa.spec == spec }
+        raise "[Bug] Unable to find file accessor for spec `#{spec.inspect}` in pod target `#{label}`" unless file_accessor
+        file_accessor.source_files.any? { |sf| sf.extname == '.swift' }
       end
     end
 
@@ -299,7 +354,16 @@ module Pod
             dsym_source = if dsym_path.exist?
                             "${PODS_ROOT}/#{relative_path_to_sandbox}.dSYM"
                           end
-            FrameworkPaths.new(framework_source, dsym_source)
+            dirname = framework_path.dirname
+            bcsymbolmap_paths = if dirname.exist?
+                                  Dir.chdir(dirname) do
+                                    Dir.glob('*.bcsymbolmap').map do |bcsymbolmap_file_name|
+                                      bcsymbolmap_path = dirname + bcsymbolmap_file_name
+                                      "${PODS_ROOT}/#{bcsymbolmap_path.relative_path_from(sandbox.root)}"
+                                    end
+                                  end
+                                end
+            FrameworkPaths.new(framework_source, dsym_source, bcsymbolmap_paths)
           end
           if !file_accessor.spec.test_specification? && should_build? && build_as_dynamic_framework?
             frameworks << FrameworkPaths.new(build_product_path('${BUILT_PRODUCTS_DIR}'))
@@ -310,12 +374,14 @@ module Pod
     end
 
     # @return [Hash{String=>Array<String>}] The resource and resource bundle paths this target depends upon keyed by
-    #         spec name.
+    #         spec name. Resources for app specs and test specs are directly added to “Copy Bundle Resources” phase
+    #         from the generated targets for frameworks, but not libraries. Therefore they are not part of the resource paths.
     #
     def resource_paths
       @resource_paths ||= begin
         file_accessors.each_with_object({}) do |file_accessor, hash|
           resource_paths = file_accessor.resources.map { |res| "${PODS_ROOT}/#{res.relative_path_from(sandbox.project_path.dirname)}" }
+          resource_paths = [] if file_accessor.spec.non_library_specification? && build_as_framework?
           prefix = Pod::Target::BuildSettings::CONFIGURATION_BUILD_DIR_VARIABLE
           prefix = configuration_build_dir unless file_accessor.spec.test_specification?
           resource_bundle_paths = file_accessor.resource_bundles.keys.map { |name| "#{prefix}/#{name.shellescape}.bundle" }
@@ -386,7 +452,7 @@ module Pod
     # @param  [Specification] subspec
     #         The subspec to use for producing the label.
     #
-    # @return [String] The derived name of the test target.
+    # @return [String] The derived name of the target.
     #
     def subspec_label(subspec)
       raise ArgumentError, 'Must not be a root spec' if subspec.root?
@@ -403,12 +469,27 @@ module Pod
     end
 
     # @param  [Specification] app_spec
-    #         The app spec to use for producing the test label.
+    #         The app spec to use for producing the app label.
     #
-    # @return [String] The derived name of the test target.
+    # @return [String] The derived name of the app target.
     #
     def app_target_label(app_spec)
       "#{label}-#{subspec_label(app_spec)}"
+    end
+
+    # @param test_spec [Specification]
+    #
+    # @return [(String,String)] a tuple, where the first item is the PodTarget#label of the pod target that defines the app host,
+    #                           and the second item is the target name of the app host
+    #
+    def app_host_target_label(test_spec)
+      app_spec, app_target = test_app_hosts_by_spec_name[test_spec.name]
+
+      if app_spec
+        [app_target.name, app_target.app_target_label(app_spec)]
+      elsif test_spec.consumer(platform).requires_app_host?
+        [name, "AppHost-#{label}-#{test_spec.test_type.capitalize}-Tests"]
+      end
     end
 
     def non_library_spec_label(spec)
@@ -417,6 +498,15 @@ module Pod
       when :app then app_target_label(spec)
       else raise ArgumentError, "Unhandled spec type #{spec.spec_type.inspect} for #{spec.inspect}"
       end
+    end
+
+    # @param  [Specification] spec
+    #         The spec to return scheme configuration for.
+    #
+    # @return [Hash] The scheme configuration used or empty if none is specified.
+    #
+    def scheme_for_spec(spec)
+      spec.consumer(platform).scheme
     end
 
     # @param  [Specification] spec
@@ -600,7 +690,7 @@ module Pod
         whitelists.first
       else
         UI.warn "The pod `#{pod_name}` is linked to different targets " \
-          "(#{target_definitions.map(&:label)}), which contain different " \
+          "(#{target_definitions.map { |td| "`#{td.label}`" }.to_sentence}), which contain different " \
           'settings to inhibit warnings. CocoaPods does not currently ' \
           'support different settings and will fall back to your preference ' \
           'set in the root target definition.'
@@ -666,6 +756,18 @@ module Pod
       header_search_paths.uniq
     end
 
+    # @param  [Specification] spec
+    #
+    # @return [BuildSettings::PodTargetSettings] The build settings for the given spec
+    #
+    def build_settings_for_spec(spec)
+      case spec.spec_type
+      when :test then test_spec_build_settings[spec.name]
+      when :app  then app_spec_build_settings[spec.name]
+      else            build_settings
+      end || raise(ArgumentError, "No build settings for #{spec}")
+    end
+
     protected
 
     # Returns whether the pod target should use modular headers.
@@ -687,6 +789,52 @@ module Pod
 
     def create_build_settings
       BuildSettings::PodTargetSettings.new(self)
+    end
+
+    def create_test_build_settings
+      Hash[test_specs.map do |test_spec|
+        [test_spec.name, BuildSettings::PodTargetSettings.new(self, test_spec)]
+      end]
+    end
+
+    def create_app_build_settings
+      Hash[app_specs.map do |app_spec|
+        [app_spec.name, BuildSettings::PodTargetSettings.new(self, app_spec)]
+      end]
+    end
+
+    # Computes the destination sub-directory in the sandbox
+    #
+    # @param  [Sandbox::FileAccessor] file_accessor
+    #         The consumer file accessor for which the headers need to be
+    #         linked.
+    #
+    # @param  [Array<Pathname>] headers
+    #         The absolute paths of the headers which need to be mapped.
+    #
+    # @return [Hash{Pathname => Array<Pathname>}] A hash containing the
+    #         headers folders as the keys and the absolute paths of the
+    #         header files as the values.
+    #
+    def header_mappings(file_accessor, headers)
+      consumer = file_accessor.spec_consumer
+      header_mappings_dir = consumer.header_mappings_dir
+      dir = headers_sandbox
+      dir += consumer.header_dir if consumer.header_dir
+
+      mappings = {}
+      headers.each do |header|
+        next if header.to_s.include?('.framework/')
+
+        sub_dir = dir
+        if header_mappings_dir
+          relative_path = header.relative_path_from(file_accessor.path_list.root + header_mappings_dir)
+          sub_dir += relative_path.dirname
+        end
+        mappings[sub_dir] ||= []
+        mappings[sub_dir] << header
+      end
+      mappings
     end
   end
 end

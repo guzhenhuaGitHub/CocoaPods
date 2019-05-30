@@ -15,7 +15,8 @@ module Pod
         target_definition = Podfile::TargetDefinition.new('Pods', nil)
         target_definition.abstract = false
         user_build_configurations = { 'Release' => :release, 'Debug' => :debug }
-        @pod_bundle = AggregateTarget.new(config.sandbox, false, user_build_configurations, [], Platform.ios, target_definition, project_path.dirname, @project, [@target.uuid], {})
+        @pod_bundle = AggregateTarget.new(config.sandbox, false, user_build_configurations, [], Platform.ios,
+                                          target_definition, project_path.dirname, @project, [@target.uuid], {})
         @pod_bundle.stubs(:resource_paths_by_config).returns('Release' => %w(${PODS_ROOT}/Lib/Resources/image.png))
         @pod_bundle.stubs(:framework_paths_by_config).returns('Release' => [Target::FrameworkPaths.new('${PODS_BUILD_DIR}/Lib/Lib.framework')])
         configuration = Xcodeproj::Config.new(
@@ -25,9 +26,7 @@ module Pod
         @pod_bundle.xcconfigs['Release'] = configuration
 
         @target_integrator = TargetIntegrator.new(@pod_bundle)
-        @target_integrator.private_methods.grep(/^update_to_cocoapods_/).each do |method|
-          @target_integrator.stubs(method)
-        end
+
         @phase_prefix = Installer::UserProjectIntegrator::TargetIntegrator::BUILD_PHASE_PREFIX
         @user_phase_prefix = Installer::UserProjectIntegrator::TargetIntegrator::USER_BUILD_PHASE_PREFIX
         @embed_framework_phase_name = @phase_prefix +
@@ -61,6 +60,32 @@ module Pod
           phase = target.frameworks_build_phase
           build_file = phase.files.find { |f| f.file_ref.path == 'libPods.a' }
           build_file.should.not.be.nil
+        end
+
+        it 'deletes old product type references if the product type has changed' do
+          @target_integrator.integrate!
+          target = @target_integrator.send(:native_targets).first
+          phase = target.frameworks_build_phase
+          phase.files.find { |f| f.file_ref.path == 'libPods.a' }.should.not.be.nil
+          phase.files.find { |f| f.file_ref.path == 'Pods.framework' }.should.be.nil
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
+          @target_integrator.integrate!
+          phase.files.find { |f| f.file_ref.path == 'libPods.a' }.should.be.nil
+          phase.files.find { |f| f.file_ref.path == 'Pods.framework' }.should.not.be.nil
+        end
+
+        it 'cleans up linked libraries and frameworks from the frameworks build phase' do
+          @pod_bundle.stubs(:build_type => Target::BuildType.dynamic_framework)
+          @target_integrator.integrate!
+          target = @target_integrator.send(:native_targets).first
+          phase = target.frameworks_build_phase
+          phase.files.find { |f| f.file_ref.path == 'Pods.framework' }.should.not.be.nil
+          phase.files.find { |f| f.file_ref.path == 'Pods-Something.framework' }.should.be.nil
+          @pod_bundle.stubs(:product_name => 'Pods-Something.framework')
+          @pod_bundle.stubs(:product_basename => 'Pods-Something')
+          @target_integrator.integrate!
+          phase.files.find { |f| f.file_ref.path == 'Pods.framework' }.should.be.nil
+          phase.files.find { |f| f.file_ref.path == 'Pods-Something.framework' }.should.not.be.nil
         end
 
         it 'adds references to the Pods static framework to the Frameworks group' do
@@ -417,7 +442,8 @@ module Pod
 
         it 'adds embed frameworks build phase input and output paths for vendored and non vendored frameworks' do
           debug_vendored_framework = Target::FrameworkPaths.new('${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework',
-                                                                '${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework.dSYM')
+                                                                '${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework.dSYM',
+                                                                ['${PODS_ROOT}/DebugVendoredFramework/ios/A6621399-62A0-3DC3-A6E3-B6B51BD287AD.bcsymbolmap'])
 
           debug_non_vendored_framework = Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/DebugCompiledFramework.framework')
 
@@ -433,6 +459,7 @@ module Pod
           phase = target.shell_script_build_phases.find { |bp| bp.name == @embed_framework_phase_name }
           phase.input_paths.sort.should == %w(
             ${BUILT_PRODUCTS_DIR}/DebugCompiledFramework/DebugCompiledFramework.framework
+            ${PODS_ROOT}/DebugVendoredFramework/ios/A6621399-62A0-3DC3-A6E3-B6B51BD287AD.bcsymbolmap
             ${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework
             ${PODS_ROOT}/DebugVendoredFramework/ios/DebugVendoredFramework.framework.dSYM
             ${PODS_ROOT}/ReleaseVendoredFramework/ios/ReleaseVendoredFramework.framework
@@ -440,6 +467,7 @@ module Pod
             ${PODS_ROOT}/Target\ Support\ Files/Pods/Pods-frameworks.sh
           )
           phase.output_paths.sort.should == %w(
+            ${BUILT_PRODUCTS_DIR}/A6621399-62A0-3DC3-A6E3-B6B51BD287AD.bcsymbolmap
             ${DWARF_DSYM_FOLDER_PATH}/DebugVendoredFramework.framework.dSYM
             ${DWARF_DSYM_FOLDER_PATH}/ReleaseVendoredFramework.framework.dSYM
             ${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/DebugCompiledFramework.framework
@@ -493,7 +521,52 @@ module Pod
           phase.shell_path.should == '/bin/sh'
           phase.input_paths.should.be.nil
           phase.output_paths.should.be.nil
-          phase.show_env_vars_in_log.should == '1'
+          phase.input_file_list_paths.should.be.nil
+          phase.output_file_list_paths.should.be.nil
+          phase.show_env_vars_in_log.should.be.nil
+        end
+
+        it 'adds a custom shell script phase with input/output paths' do
+          @pod_bundle.target_definition.stubs(:script_phases).returns([:name => 'Custom Script',
+                                                                       :script => 'echo "Hello World"',
+                                                                       :input_files => ['/path/to/input_file.txt'],
+                                                                       :output_files => ['/path/to/output_file.txt'],
+                                                                       :input_file_lists => ['/path/to/input_file.xcfilelist'],
+                                                                       :output_file_lists => ['/path/to/output_file.xcfilelist']])
+          @target_integrator.integrate!
+          target = @target_integrator.send(:native_targets).first
+          phase = target.shell_script_build_phases.find { |bp| bp.name == @user_script_phase_name }
+          phase.name.should == '[CP-User] Custom Script'
+          phase.shell_script.should == 'echo "Hello World"'
+          phase.shell_path.should == '/bin/sh'
+          phase.input_paths.should == ['/path/to/input_file.txt']
+          phase.output_paths.should == ['/path/to/output_file.txt']
+          phase.input_file_list_paths == ['/path/to/input_file.xcfilelist']
+          phase.output_file_list_paths.should == ['/path/to/output_file.xcfilelist']
+          phase.show_env_vars_in_log.should.be.nil
+        end
+
+        it 'sets the show_env_vars_in_log value to 0 if its explicitly set' do
+          @pod_bundle.target_definition.stubs(:script_phases).returns([:name => 'Custom Script',
+                                                                       :script => 'echo "Hello World"',
+                                                                       :show_env_vars_in_log => '0'])
+          @target_integrator.integrate!
+          target = @target_integrator.send(:native_targets).first
+          phase = target.shell_script_build_phases.find { |bp| bp.name == @user_script_phase_name }
+          phase.show_env_vars_in_log.should == '0'
+        end
+
+        it 'does not set the show_env_vars_in_log value to 1 even if its set' do
+          # Since Xcode 10 this value never gets transcribed into the `.pbxproj` file which causes Xcode 10 to _remove_
+          # it if it's been added and causing a dirty file in git repos.
+          @pod_bundle.target_definition.stubs(:script_phases).returns([:name => 'Custom Script',
+                                                                       :script => 'echo "Hello World"',
+                                                                       :show_env_vars_in_log => '1'])
+          @target_integrator.integrate!
+          target = @target_integrator.send(:native_targets).first
+          phase = target.shell_script_build_phases.find { |bp| bp.name == @user_script_phase_name }
+          # Even though the user has set this to '1' we expect this to be `nil`.
+          phase.show_env_vars_in_log.should.be.nil
         end
 
         it 'removes outdated custom shell script phases' do

@@ -60,7 +60,7 @@ module Pod
       @platforms_by_dependency = Hash.new { |h, k| h[k] = [] }
 
       @cached_sets = {}
-      @podfile_requirements_by_root_name = @podfile_dependency_cache.podfile_dependencies.group_by(&:root_name).each_value { |a| a.map!(&:requirement) }
+      @podfile_requirements_by_root_name = @podfile_dependency_cache.podfile_dependencies.group_by(&:root_name).each_value { |a| a.map!(&:requirement).freeze }.freeze
       @search = {}
       @validated_platforms = Set.new
     end
@@ -83,7 +83,7 @@ module Pod
           next unless target.platform
           @platforms_by_dependency[dep].push(target.platform)
         end
-      end
+      end.uniq
       @platforms_by_dependency.each_value(&:uniq!)
       @activated = Molinillo::Resolver.new(self, self).resolve(dependencies, locked_dependencies)
       resolver_specs_by_target
@@ -99,15 +99,32 @@ module Pod
     def resolver_specs_by_target
       @resolver_specs_by_target ||= {}.tap do |resolver_specs_by_target|
         @podfile_dependency_cache.target_definition_list.each do |target|
+          next if target.abstract? && !target.platform
+
           # can't use vertex.root? since that considers _all_ targets
           explicit_dependencies = @podfile_dependency_cache.target_definition_dependencies(target).map(&:name).to_set
-          vertices = valid_dependencies_for_target(target)
 
-          resolver_specs_by_target[target] = vertices.
+          used_by_aggregate_target_by_spec_name = {}
+          used_vertices_by_spec_name = {}
+
+          # it's safe to make a single pass here since we iterate in topological order,
+          # so all of the predecessors have been visited before we get to a node.
+          # #tsort returns no-children vertices first, and we want them last (i.e. we want no-parent vertices first)
+          @activated.tsort.reverse_each do |vertex|
+            spec_name = vertex.name
+            explicitly_included = explicit_dependencies.include?(spec_name)
+            if explicitly_included || vertex.incoming_edges.any? { |edge| used_vertices_by_spec_name.key?(edge.origin.name) && edge_is_valid_for_target_platform?(edge, target.platform) }
+              validate_platform(vertex.payload, target)
+              used_vertices_by_spec_name[spec_name] = vertex
+              used_by_aggregate_target_by_spec_name[spec_name] = vertex.payload.library_specification? &&
+                (explicitly_included || vertex.predecessors.any? { |predecessor| used_by_aggregate_target_by_spec_name.fetch(predecessor.name, false) })
+            end
+          end
+
+          resolver_specs_by_target[target] = used_vertices_by_spec_name.each_value.
             map do |vertex|
               payload = vertex.payload
-              non_library = (!explicit_dependencies.include?(vertex.name) || payload.test_specification? || payload.app_specification?) &&
-                (vertex.recursive_predecessors & vertices).all? { |v| !explicit_dependencies.include?(v.name) || v.payload.test_specification? }
+              non_library = !used_by_aggregate_target_by_spec_name.fetch(vertex.name)
               spec_source = payload.respond_to?(:spec_source) && payload.spec_source
               ResolverSpecification.new(payload, non_library, spec_source)
             end.
@@ -133,10 +150,13 @@ module Pod
     #
     def search_for(dependency)
       @search[dependency] ||= begin
-        locked_requirement = requirement_for_locked_pod_named(dependency.name)
-        podfile_deps = Array(@podfile_requirements_by_root_name[dependency.root_name])
-        podfile_deps << locked_requirement if locked_requirement
-        specifications_for_dependency(dependency, podfile_deps)
+        additional_requirements = if locked_requirement = requirement_for_locked_pod_named(dependency.name)
+                                    [locked_requirement]
+                                  else
+                                    Array(@podfile_requirements_by_root_name[dependency.root_name])
+                                  end
+
+        specifications_for_dependency(dependency, additional_requirements)
       end
       @search[dependency].dup
     end
@@ -328,10 +348,11 @@ module Pod
     # @return [Array<Specification>] List of specifications satisfying given requirements.
     #
     def specifications_for_dependency(dependency, additional_requirements = [])
-      requirement = Requirement.new(dependency.requirement.as_list + additional_requirements.flat_map(&:as_list))
+      requirement_list = dependency.requirement.as_list + additional_requirements.flat_map(&:as_list)
+      requirement_list.uniq!
+      requirement = Requirement.new(requirement_list)
       find_cached_set(dependency).
-        all_specifications(warn_for_multiple_pod_sources).
-        select { |s| requirement.satisfied_by? s.version }.
+        all_specifications(warn_for_multiple_pod_sources, requirement).
         map { |s| s.subspec_by_name(dependency.name, false, true) }.
         compact
     end
@@ -439,8 +460,14 @@ module Pod
               # Conflict was caused by a requirement from a local dependency.
               # Tell user to use `pod update`.
               o << "\nIt seems like you've changed the constraints of dependency `#{name}` " \
-              "inside your development pod `#{local_pod_parent.name}`.\nYou should run `pod update #{name}` to apply " \
+              "inside your development pod `#{local_pod_parent.name}`.\nYou should run `pod update #{name}` to apply "\
               "changes you've made."
+            elsif !conflict.possibility && conflict.locked_requirement && conflict.locked_requirement.external_source && conflict.locked_requirement.external_source[:podspec] &&
+                                           conflict.requirement && conflict.requirement.external_source && conflict.requirement.external_source[:podspec]
+              # The internal version of the Podspec doesn't match the external definition of a podspec
+              o << "\nIt seems like you've changed the version of the dependency `#{name}` " \
+              "and it differs from the version stored in `Pods/Local Podspecs`.\nYou should run `pod update #{name} --no-repo-update` to apply " \
+              'changes made locally.'
             elsif (conflict.possibility && conflict.possibility.version.prerelease?) &&
                 (conflict.requirement && !(
                 conflict.requirement.prerelease? ||
@@ -524,33 +551,21 @@ Note: as of CocoaPods 1.0, `pod repo update` does not happen on `pod install` by
       end
     end
 
-    # Returns the target-appropriate nodes that are `successors` of `node`,
-    # rejecting those that are scoped by target platform and have incompatible
-    # targets.
-    #
-    # @return [Array<Molinillo::DependencyGraph::Vertex>]
-    #         An array of target-appropriate nodes whose `payload`s are
-    #         dependencies for `target`.
-    #
-    def valid_dependencies_for_target(target)
-      dependencies = Set.new
-      @podfile_dependency_cache.target_definition_dependencies(target).each do |dep|
-        node = @activated.vertex_named(dep.name)
-        add_valid_dependencies_from_node(node, target, dependencies)
+    class EdgeAndPlatform
+      def initialize(edge, target_platform)
+        @edge = edge
+        @target_platform = target_platform
       end
-      dependencies
-    end
+      attr_reader :edge, :target_platform
 
-    def add_valid_dependencies_from_node(node, target, dependencies)
-      return unless dependencies.add?(node)
-      validate_platform(node.payload, target)
-      node.outgoing_edges.each do |edge|
-        next unless edge_is_valid_for_target_platform?(edge, target.platform)
-        add_valid_dependencies_from_node(edge.destination, target, dependencies)
+      def eql?(other)
+        edge.equal?(other.edge) && target_platform.eql?(other.target_platform)
+      end
+
+      def hash
+        edge.object_id ^ target_platform.hash
       end
     end
-
-    EdgeAndPlatform = Struct.new(:edge, :target_platform)
     private_constant :EdgeAndPlatform
 
     # Whether the given `edge` should be followed to find dependencies for the

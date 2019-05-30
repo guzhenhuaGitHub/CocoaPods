@@ -31,16 +31,16 @@ module Pod
 
             it 'adds the file references of the frameworks of the project' do
               @installer.install!
-              file_ref = @installer.pods_project['Pods/BananaLib/Frameworks/Bananalib.framework']
+              file_ref = @installer.pods_project['Pods/BananaLib/Frameworks/BananaFramework.framework']
               file_ref.should.be.not.nil
-              file_ref.path.should == 'Bananalib.framework'
+              file_ref.path.should == 'BananaFramework.framework'
             end
 
             it 'adds the file references of the libraries of the project' do
               @installer.install!
-              file_ref = @installer.pods_project['Pods/BananaLib/Frameworks/libBananalib.a']
+              file_ref = @installer.pods_project['Pods/BananaLib/Frameworks/libBananaStaticLib.a']
               file_ref.should.be.not.nil
-              file_ref.path.should == 'libBananalib.a'
+              file_ref.path.should == 'libBananaStaticLib.a'
             end
 
             it 'adds files references for the resources of the Pods project' do
@@ -75,7 +75,7 @@ module Pod
               headers_root = @pod_target.build_headers.root
               public_headers = [headers_root + 'BananaLib/Banana.h', headers_root + 'BananaLib/MoreBanana.h']
               private_header = headers_root + 'BananaLib/BananaPrivate.h'
-              framework_header = headers_root + 'BananaLib/Bananalib/Bananalib.h'
+              framework_header = headers_root + 'BananaLib/BananaFramework/BananaFramework.h'
               public_headers.each { |public_header| public_header.should.exist }
               private_header.should.exist
               framework_header.should.not.exist
@@ -86,8 +86,8 @@ module Pod
               headers_root = config.sandbox.public_headers.root
               public_headers = [headers_root + 'BananaLib/Banana.h', headers_root + 'BananaLib/MoreBanana.h']
               private_header = headers_root + 'BananaLib/BananaPrivate.h'
-              framework_header = headers_root + 'BananaLib/Bananalib/Bananalib.h'
-              framework_subdir_header = headers_root + 'BananaLib/Bananalib/SubDir/SubBananalib.h'
+              framework_header = headers_root + 'BananaLib/BananaFramework/BananaFramework.h'
+              framework_subdir_header = headers_root + 'BananaLib/BananaFramework/SubDir/SubBananaFramework.h'
               public_headers.each { |public_header| public_header.should.exist }
               private_header.should.not.exist
               framework_header.should.not.exist
@@ -107,17 +107,13 @@ module Pod
               banana_headers.each { |banana_header| banana_header.should.not.exist }
               monkey_header = headers_root + 'monkey/monkey.h'
               monkey_header.should.exist # since it lives outside of the vendored framework
-              config.sandbox.public_headers.search_paths(pod_target_one.platform).should == %w(
-                ${PODS_ROOT}/Headers/Public
-                ${PODS_ROOT}/Headers/Public/monkey
-              )
             end
 
             it 'does not link public headers from vendored framework, when frameworks required' do
               @pod_target.stubs(:build_type).returns(Target::BuildType.dynamic_framework)
               @installer.install!
               headers_root = config.sandbox.public_headers.root
-              framework_header = headers_root + 'BananaLib/Bananalib/Bananalib.h'
+              framework_header = headers_root + 'BananaLib/BananaFramework/BananaFramework.h'
               framework_header.should.not.exist
             end
 
@@ -208,11 +204,11 @@ module Pod
             describe '#file_accessors' do
               it 'returns the file accessors' do
                 pod_target_1 = PodTarget.new(config.sandbox, false, {}, [], Platform.ios,
-                                             [stub('Spec', :test_specification? => false, :library_specification? => true, :app_specification? => false, :spec_type => :library)],
+                                             [stub('Spec', :test_specification? => false, :library_specification? => true, :non_library_specification? => false, :app_specification? => false, :spec_type => :library)],
                                              [fixture_target_definition],
                                              [fixture_file_accessor('banana-lib/BananaLib.podspec')])
                 pod_target_2 = PodTarget.new(config.sandbox, false, {}, [], Platform.ios,
-                                             [stub('Spec', :test_specification? => false, :library_specification? => true, :app_specification? => false, :spec_type => :library)],
+                                             [stub('Spec', :test_specification? => false, :library_specification? => true, :non_library_specification? => false, :app_specification? => false, :spec_type => :library)],
                                              [fixture_target_definition],
                                              [fixture_file_accessor('banana-lib/BananaLib.podspec')])
                 installer = FileReferencesInstaller.new(config.sandbox, [pod_target_1, pod_target_2], @project)
@@ -221,53 +217,11 @@ module Pod
               end
 
               it 'handles pods without file accessors' do
-                pod_target_1 = PodTarget.new(config.sandbox, false, {}, [], Platform.ios, [stub('Spec', :test_specification? => false, :library_specification? => true, :app_specification? => false, :spec_type => :library)], [fixture_target_definition], [])
+                pod_target_1 = PodTarget.new(config.sandbox, false, {}, [], Platform.ios,
+                                             [stub('Spec', :test_specification? => false, :library_specification? => true, :non_library_specification? => false, :app_specification? => false, :spec_type => :library)],
+                                             [fixture_target_definition], [])
                 installer = FileReferencesInstaller.new(config.sandbox, [pod_target_1], @project)
                 installer.send(:file_accessors).should == []
-              end
-            end
-
-            describe '#header_mappings' do
-              it 'returns the correct public header mappings' do
-                headers_sandbox = Pathname.new('BananaLib')
-                headers = [Pathname.new('Banana.h')]
-                mappings = @installer.send(:header_mappings, headers_sandbox, @file_accessor, headers)
-                mappings.should == {
-                  Pathname.new('BananaLib') => [Pathname.new('Banana.h')],
-                }
-              end
-
-              it 'takes into account the header dir specified in the spec for public headers' do
-                headers_sandbox = Pathname.new('BananaLib')
-                headers = [Pathname.new('Banana.h')]
-                @file_accessor.spec_consumer.stubs(:header_dir).returns('Sub_dir')
-                mappings = @installer.send(:header_mappings, headers_sandbox, @file_accessor, headers)
-                mappings.should == {
-                  Pathname.new('BananaLib/Sub_dir') => [Pathname.new('Banana.h')],
-                }
-              end
-
-              it 'takes into account the header dir specified in the spec for private headers' do
-                headers_sandbox = Pathname.new('BananaLib')
-                headers = [Pathname.new('Banana.h')]
-                @file_accessor.spec_consumer.stubs(:header_dir).returns('Sub_dir')
-                mappings = @installer.send(:header_mappings, headers_sandbox, @file_accessor, headers)
-                mappings.should == {
-                  Pathname.new('BananaLib/Sub_dir') => [Pathname.new('Banana.h')],
-                }
-              end
-
-              it 'takes into account the header mappings dir specified in the spec' do
-                headers_sandbox = Pathname.new('BananaLib')
-                header_1 = @file_accessor.root + 'BananaLib/sub_dir/dir_1/banana_1.h'
-                header_2 = @file_accessor.root + 'BananaLib/sub_dir/dir_2/banana_2.h'
-                headers = [header_1, header_2]
-                @file_accessor.spec_consumer.stubs(:header_mappings_dir).returns('BananaLib/sub_dir')
-                mappings = @installer.send(:header_mappings, headers_sandbox, @file_accessor, headers)
-                mappings.should == {
-                  (headers_sandbox + 'dir_1') => [header_1],
-                  (headers_sandbox + 'dir_2') => [header_2],
-                }
               end
             end
 
@@ -322,6 +276,21 @@ module Pod
                 result = @installer.send(:common_path, paths)
                 result.should.be.nil
               end
+            end
+          end
+
+          #-------------------------------------------------------------------------#
+
+          describe 'Installation With Development Pods' do
+            before do
+              @project = Project.new(config.sandbox.project_path)
+              @project.add_pod_group('BananaLib', fixture('banana-lib'), true)
+            end
+
+            it 'sets the path of the Pod group to the installation root' do
+              @installer.install!
+              group = @project.group_for_spec('BananaLib')
+              group.path.should == '../../spec/fixtures/banana-lib'
             end
           end
 

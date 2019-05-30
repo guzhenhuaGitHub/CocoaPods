@@ -59,8 +59,18 @@ module Pod
                                                                        user_build_configurations, [], @osx_platform,
                                                                        [@osx_target_definition], 'macOS')
 
+            @grapefruits_spec = fixture_spec('grapefruits-lib/GrapefruitsLib.podspec')
+            @grapefruits_app_spec = @grapefruits_spec.app_specs.first
+            @grapefruits_ios_pod_target = fixture_pod_target_with_specs([@grapefruits_spec,
+                                                                         @grapefruits_app_spec], false,
+                                                                        user_build_configurations, [], @ios_platform,
+                                                                        [@ios_target_definition], 'iOS')
+            @grapefruits_ios_pod_target.app_dependent_targets_by_spec_name = { @coconut_test_spec.name => [@monkey_pod_target] }
+
+            @grapefruits_ios_pod_target.app_dependent_targets_by_spec_name[@grapefruits_ios_pod_target.app_specs.first.name] = [@banana_ios_pod_target]
+
             ios_pod_targets = [@banana_ios_pod_target, @monkey_ios_pod_target, @coconut_ios_pod_target,
-                               @orangeframework_pod_target, @watermelon_ios_pod_target]
+                               @orangeframework_pod_target, @watermelon_ios_pod_target, @grapefruits_ios_pod_target]
             osx_pod_targets = [@banana_osx_pod_target, @monkey_osx_pod_target, @coconut_osx_pod_target, @watermelon_osx_pod_target]
             pod_targets = ios_pod_targets + osx_pod_targets
 
@@ -80,8 +90,8 @@ module Pod
 
             @installation_options = Pod::Installer::InstallationOptions.new
 
-            @generator = SinglePodsProjectGenerator.new(config.sandbox, aggregate_targets, pod_targets, @analysis_result,
-                                                        @installation_options, config)
+            @generator = SinglePodsProjectGenerator.new(config.sandbox, aggregate_targets, pod_targets, @analysis_result.all_user_build_configurations,
+                                                        @installation_options, config, nil)
           end
 
           it "creates build configurations for all of the user's targets" do
@@ -159,16 +169,22 @@ module Pod
               'CoconutLib-iOS-Unit-Tests',
               'CoconutLib-macOS',
               'CoconutLib-macOS-Unit-Tests',
+              'GrapefruitsLib-iOS',
+              'GrapefruitsLib-iOS-App',
               'OrangeFramework',
               'Pods-SampleApp-iOS',
               'Pods-SampleApp-macOS',
               'WatermelonLib-iOS',
+              'WatermelonLib-iOS-App',
               'WatermelonLib-iOS-Unit-SnapshotTests',
               'WatermelonLib-iOS-Unit-Tests',
+              'WatermelonLib-iOS-WatermelonLibExampleAppResources',
               'WatermelonLib-iOS-WatermelonLibTestResources',
               'WatermelonLib-macOS',
+              'WatermelonLib-macOS-App',
               'WatermelonLib-macOS-Unit-SnapshotTests',
               'WatermelonLib-macOS-Unit-Tests',
+              'WatermelonLib-macOS-WatermelonLibExampleAppResources',
               'WatermelonLib-macOS-WatermelonLibTestResources',
               'monkey-iOS',
               'monkey-macOS',
@@ -188,6 +204,7 @@ module Pod
             pod_generator_result.project.targets.find { |t| t.name == 'Pods-SampleApp-iOS' }.dependencies.map(&:name).sort.should == [
               'BananaLib-iOS',
               'CoconutLib-iOS',
+              'GrapefruitsLib-iOS',
               'OrangeFramework',
               'WatermelonLib-iOS',
               'monkey-iOS',
@@ -267,6 +284,31 @@ module Pod
             pod_generator_result.project.targets.find { |t| t.name == 'CoconutLib-macOS-Unit-Tests' }.dependencies.map(&:name).should == [
               'CoconutLib-macOS',
             ]
+          end
+
+          it 'sets the app host app spec dependency for the tests that need it' do
+            @coconut_test_spec.ios.requires_app_host = true
+            @coconut_test_spec.ios.app_host_name = @grapefruits_app_spec.name
+            @coconut_ios_pod_target.test_app_hosts_by_spec_name = { @coconut_test_spec.name => [@grapefruits_app_spec, @grapefruits_ios_pod_target] }
+            pod_generator_result = @generator.generate!
+            coconut_project = pod_generator_result.project
+            coconut_project.should.not.be.nil
+            coconut_project.targets.find { |t| t.name == 'AppHost-CoconutLib-iOS-Unit-Tests' }.should.be.nil
+            coconut_project.targets.find { |t| t.name == 'CoconutLib-iOS-Unit-Tests' }.dependencies.map(&:name).sort.should == [
+              'CoconutLib-iOS',
+              'GrapefruitsLib-iOS-App',
+            ]
+            coconut_project.targets.find { |t| t.name == 'AppHost-CoconutLib-macOS-Unit-Tests' }.should.be.nil
+            coconut_project.targets.find { |t| t.name == 'CoconutLib-macOS-Unit-Tests' }.dependencies.map(&:name).should == [
+              'CoconutLib-macOS',
+            ]
+          end
+
+          it 'raises when a test spec has an app_host_name with requires_app_host = false' do
+            @coconut_test_spec.ios.requires_app_host = false
+            @coconut_test_spec.ios.app_host_name = @grapefruits_app_spec.name + '/Foo'
+            -> { @generator.generate! }.should.raise(Informative).
+              message.should.include '`CoconutLib-iOS-unit-Tests` manually specifies an app host but has not specified `requires_app_host = true`.'
           end
 
           it 'adds framework file references for framework pod targets that require building' do
@@ -375,7 +417,7 @@ module Pod
           it "uses the user project's object version for the pods project" do
             tmp_directory = Pathname(Dir.tmpdir) + 'CocoaPods'
             FileUtils.mkdir_p(tmp_directory)
-            proj = Xcodeproj::Project.new(tmp_directory + 'Yolo.xcodeproj', false, 1)
+            proj = Xcodeproj::Project.new(tmp_directory + 'Yolo.xcodeproj', false, 51)
             proj.save
 
             user_target = stub('SampleApp-iOS-User-Target', :symbol_type => :application)
@@ -389,9 +431,10 @@ module Pod
             target.stubs(:user_targets).returns([user_target])
 
             @generator = SinglePodsProjectGenerator.new(config.sandbox, [target], [],
-                                                        @analysis_result, @installation_options, config)
+                                                        @analysis_result.all_user_build_configurations,
+                                                        @installation_options, config, 51)
             pod_generator_result = @generator.generate!
-            pod_generator_result.project.object_version.should == '1'
+            pod_generator_result.project.object_version.should == '51'
 
             FileUtils.rm_rf(tmp_directory)
           end
@@ -401,7 +444,7 @@ module Pod
               pod_generator_result = @generator.generate!
               pod_generator_result.project.main_group.expects(:sort)
               Xcodeproj::Project.any_instance.stubs(:recreate_user_schemes)
-              Xcode::PodsProjectWriter.new(@generator.sandbox, pod_generator_result.project,
+              Xcode::PodsProjectWriter.new(@generator.sandbox, [pod_generator_result.project],
                                            pod_generator_result.target_installation_results.pod_target_installation_results,
                                            @generator.installation_options).write!
             end
@@ -410,7 +453,7 @@ module Pod
               pod_generator_result = @generator.generate!
               Xcodeproj::Project.any_instance.stubs(:recreate_user_schemes)
               pod_generator_result.project.expects(:save)
-              Xcode::PodsProjectWriter.new(@generator.sandbox, pod_generator_result.project,
+              Xcode::PodsProjectWriter.new(@generator.sandbox, [pod_generator_result.project],
                                            pod_generator_result.target_installation_results.pod_target_installation_results,
                                            @generator.installation_options).write!
             end
@@ -419,7 +462,7 @@ module Pod
           describe '#share_development_pod_schemes' do
             it 'does not share by default' do
               Xcodeproj::XCScheme.expects(:share_scheme).never
-              @generator.share_development_pod_schemes(nil)
+              @generator.configure_schemes(nil, [])
             end
 
             it 'can share all schemes' do
@@ -438,120 +481,146 @@ module Pod
                 pod_generator_result.project.path,
                 'BananaLib-macOS')
 
-              development_pod_targets = @generator.pod_targets.select { |pod_target| @generator.sandbox.local?(pod_target.pod_name) }
-              @generator.share_development_pod_schemes(pod_generator_result.project, development_pod_targets)
+              @generator.configure_schemes(pod_generator_result.project, @generator.pod_targets)
             end
-          end
 
-          it 'shares test schemes' do
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns(true)
-            @generator.sandbox.stubs(:development_pods).returns('CoconutLib' => fixture('CoconutLib'))
+            it 'shares test schemes' do
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns(true)
+              @generator.sandbox.stubs(:development_pods).returns('CoconutLib' => fixture('CoconutLib'))
 
-            pod_generator_result = @generator.generate!
+              pod_generator_result = @generator.generate!
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'CoconutLib-iOS')
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'CoconutLib-iOS')
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'CoconutLib-iOS-Unit-Tests')
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'CoconutLib-iOS-Unit-Tests')
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'CoconutLib-macOS')
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'CoconutLib-macOS')
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'CoconutLib-macOS-Unit-Tests')
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'CoconutLib-macOS-Unit-Tests')
 
-            development_pod_targets = @generator.pod_targets.select { |pod_target| @generator.sandbox.local?(pod_target.pod_name) }
-            @generator.share_development_pod_schemes(pod_generator_result.project, development_pod_targets)
-          end
+              @generator.configure_schemes(pod_generator_result.project, @generator.pod_targets)
+            end
 
-          it 'allows opting out' do
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns(false)
+            it 'correctly configures schemes for all specs' do
+              @coconut_spec.scheme = { :launch_arguments => ['Arg1'] }
+              @coconut_test_spec.scheme = { :launch_arguments => ['TestArg1'], :environment_variables => { 'Key1' => 'Val1' } }
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns(true)
+              @generator.sandbox.stubs(:development_pods).returns('CoconutLib' => fixture('CoconutLib'))
 
-            Xcodeproj::XCScheme.expects(:share_scheme).never
-            @generator.share_development_pod_schemes(nil)
+              pod_generator_result = @generator.generate!
 
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns(nil)
+              Xcode::PodsProjectWriter.new(config.sandbox, [pod_generator_result.project],
+                                           pod_generator_result.target_installation_results.pod_target_installation_results,
+                                           @generator.installation_options).write!
 
-            Xcodeproj::XCScheme.expects(:share_scheme).never
-            @generator.share_development_pod_schemes(nil)
-          end
+              @generator.configure_schemes(pod_generator_result.project, @generator.pod_targets)
 
-          it 'allows specifying strings of pods to share' do
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns(%w(BananaLib))
+              scheme_path = Xcodeproj::XCScheme.shared_data_dir(pod_generator_result.project.path) + 'CoconutLib-iOS.xcscheme'
+              scheme = Xcodeproj::XCScheme.new(scheme_path)
+              scheme.launch_action.command_line_arguments.all_arguments.map(&:to_h).should == [
+                { :argument => 'Arg1', :enabled => true },
+              ]
+              test_scheme_path = Xcodeproj::XCScheme.shared_data_dir(pod_generator_result.project.path) + 'CoconutLib-iOS-Unit-Tests.xcscheme'
+              test_scheme = Xcodeproj::XCScheme.new(test_scheme_path)
+              test_scheme.launch_action.command_line_arguments.all_arguments.map(&:to_h).should == [
+                { :argument => 'TestArg1', :enabled => true },
+              ]
+              test_scheme.launch_action.environment_variables.all_variables.map(&:to_h).should == [
+                { :key => 'Key1', :value => 'Val1', :enabled => true },
+              ]
+            end
 
-            pod_generator_result = @generator.generate!
-            @generator.sandbox.stubs(:development_pods).returns('BananaLib' => fixture('BananaLib'))
+            it 'allows opting out' do
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns(false)
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'BananaLib-iOS')
+              Xcodeproj::XCScheme.expects(:share_scheme).never
+              @generator.configure_schemes(nil, [])
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'BananaLib-macOS')
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns(nil)
 
-            development_pod_targets = @generator.pod_targets.select { |pod_target| @generator.sandbox.local?(pod_target.pod_name) }
-            @generator.share_development_pod_schemes(pod_generator_result.project, development_pod_targets)
+              Xcodeproj::XCScheme.expects(:share_scheme).never
+              @generator.configure_schemes(nil, [])
+            end
 
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns(%w(orange-framework))
+            it 'allows specifying strings of pods to share' do
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns(%w(BananaLib))
 
-            Xcodeproj::XCScheme.expects(:share_scheme).never
-            @generator.share_development_pod_schemes(pod_generator_result.project, development_pod_targets)
-          end
+              pod_generator_result = @generator.generate!
+              @generator.sandbox.stubs(:development_pods).returns('BananaLib' => fixture('BananaLib'))
 
-          it 'allows specifying regular expressions of pods to share' do
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns([/bAnaNalIb/i, /B*/])
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'BananaLib-iOS')
 
-            pod_generator_result = @generator.generate!
-            @generator.sandbox.stubs(:development_pods).returns('BananaLib' => fixture('BananaLib'))
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'BananaLib-macOS')
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'BananaLib-iOS')
+              @generator.configure_schemes(pod_generator_result.project, @generator.pod_targets)
 
-            Xcodeproj::XCScheme.expects(:share_scheme).with(
-              pod_generator_result.project.path,
-              'BananaLib-macOS')
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns(%w(orange-framework))
 
-            development_pod_targets = @generator.pod_targets.select { |pod_target| @generator.sandbox.local?(pod_target.pod_name) }
-            @generator.share_development_pod_schemes(pod_generator_result.project, development_pod_targets)
+              Xcodeproj::XCScheme.expects(:share_scheme).never
+              @generator.configure_schemes(pod_generator_result.project, @generator.pod_targets)
+            end
 
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns([/banana$/, /[^\A]BananaLib/])
+            it 'allows specifying regular expressions of pods to share' do
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns([/bAnaNalIb/i, /B*/])
 
-            Xcodeproj::XCScheme.expects(:share_scheme).never
-            @generator.share_development_pod_schemes(nil)
-          end
+              pod_generator_result = @generator.generate!
+              @generator.sandbox.stubs(:development_pods).returns('BananaLib' => fixture('BananaLib'))
 
-          it 'raises when an invalid type is set' do
-            @generator.installation_options.
-                stubs(:share_schemes_for_development_pods).
-                returns(Pathname('foo'))
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'BananaLib-iOS')
 
-            pod_generator_result = @generator.generate!
-            @generator.sandbox.stubs(:development_pods).returns('BananaLib' => fixture('BananaLib'))
-            development_pod_targets = @generator.pod_targets.select { |pod_target| @generator.sandbox.local?(pod_target.pod_name) }
-            Xcodeproj::XCScheme.expects(:share_scheme).never
-            e = should.raise(Informative) { @generator.share_development_pod_schemes(pod_generator_result.project, development_pod_targets) }
-            e.message.should.match /share_schemes_for_development_pods.*set it to true, false, or an array of pods to share schemes for/
+              Xcodeproj::XCScheme.expects(:share_scheme).with(
+                pod_generator_result.project.path,
+                'BananaLib-macOS')
+
+              @generator.configure_schemes(pod_generator_result.project, @generator.pod_targets)
+
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns([/banana$/, /[^\A]BananaLib/])
+
+              Xcodeproj::XCScheme.expects(:share_scheme).never
+              @generator.configure_schemes(nil, [])
+            end
+
+            it 'raises when an invalid type is set' do
+              @generator.installation_options.
+                  stubs(:share_schemes_for_development_pods).
+                  returns(Pathname('foo'))
+
+              pod_generator_result = @generator.generate!
+              @generator.sandbox.stubs(:development_pods).returns('BananaLib' => fixture('BananaLib'))
+              Xcodeproj::XCScheme.expects(:share_scheme).never
+              e = should.raise(Informative) { @generator.configure_schemes(pod_generator_result.project, @generator.pod_targets) }
+              e.message.should.match /share_schemes_for_development_pods.*set it to true, false, or an array of pods to share schemes for/
+            end
           end
         end
       end

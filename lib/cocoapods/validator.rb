@@ -125,7 +125,6 @@ module Pod
       $stdout.flush
 
       perform_linting
-      warn_for_dot_swift_file_deprecation
       perform_extensive_analysis(a_spec) if a_spec && !quick
 
       UI.puts ' -> '.send(result_color) << (a_spec ? a_spec.to_s : file.basename.to_s)
@@ -198,7 +197,7 @@ module Pod
 
     #-------------------------------------------------------------------------#
 
-    #  @!group Configuration
+    #  @!group Configuration
 
     # @return [Bool] whether the validation should skip the checks that
     #         requires the download of the library.
@@ -240,6 +239,10 @@ module Pod
     #
     attr_accessor :skip_tests
 
+    # @return [Bool] Whether the validator should run Xcode Static Analysis.
+    #
+    attr_accessor :analyze
+
     # @return [Bool] Whether frameworks should be used for the installation.
     #
     attr_accessor :use_frameworks
@@ -252,6 +255,16 @@ module Pod
     #         Bool be skipped.
     #
     attr_accessor :ignore_public_only_results
+
+    # @return [String] A glob for podspecs to be used during building of
+    #         the local Podfile via :path.
+    #
+    attr_accessor :include_podspecs
+
+    # @return [String] A glob for podspecs to be used during building of
+    #         the local Podfile via :podspec.
+    #
+    attr_accessor :external_podspecs
 
     attr_accessor :skip_import_validation
     alias_method :skip_import_validation?, :skip_import_validation
@@ -350,22 +363,11 @@ module Pod
       @results.concat(linter.results.to_a)
     end
 
-    # Warns the user to delete the `.swift-version` file in favor of the `swift_versions` DSL attribute. This is
-    # intentionally not a lint warning since we do not want to break existing setups and instead just soft deprecate
-    # this slowly.
-    #
-    def warn_for_dot_swift_file_deprecation
-      if swift_version.nil? && (!spec.nil? && spec.swift_versions.empty?) && !dot_swift_version.nil?
-        UI.warn 'Usage of the `.swift_version` file has been deprecated! Please delete the file and use the ' \
-          "`swift_versions` attribute within your podspec instead.\n".yellow
-      end
-    end
-
     # Perform analysis for a given spec (or subspec)
     #
     def perform_extensive_analysis(spec)
-      if spec.test_specification?
-        error('spec', "Validating a test spec (`#{spec.name}`) is not supported.")
+      if spec.non_library_specification?
+        error('spec', "Validating a non library spec (`#{spec.name}`) is not supported.")
         return false
       end
       validate_homepage(spec)
@@ -407,7 +409,7 @@ module Pod
     # Recursively perform the extensive analysis on all subspecs
     #
     def perform_extensive_subspec_analysis(spec)
-      spec.subspecs.reject(&:test_specification?).send(fail_fast ? :all? : :each) do |subspec|
+      spec.subspecs.reject(&:non_library_specification?).send(fail_fast ? :all? : :each) do |subspec|
         @subspec_name = subspec.name
         perform_extensive_analysis(subspec)
       end
@@ -467,7 +469,7 @@ module Pod
       return if spec.source.nil? || spec.source[:http].nil?
       url = URI(spec.source[:http])
       return if url.scheme == 'https' || url.scheme == 'file'
-      warning('http', "The URL (`#{url}`) doesn't use the encrypted HTTPs protocol. " \
+      warning('http', "The URL (`#{url}`) doesn't use the encrypted HTTPS protocol. " \
               'It is crucial for Pods to be transferred over a secure protocol to protect your users from man-in-the-middle attacks. '\
               'This will be an error in future releases. Please update the URL to use https.')
     end
@@ -487,13 +489,14 @@ module Pod
     def validate_swift_version
       return unless uses_swift?
       spec_swift_versions = spec.swift_versions.map(&:to_s)
+
       unless spec_swift_versions.empty?
         message = nil
         if !dot_swift_version.nil? && !spec_swift_versions.include?(dot_swift_version)
-          message = "Specification `#{spec.name}` specifies inconsistent `swift_versions` (#{spec_swift_versions.map { |s| "`#{s}`" }.join(', ')}) compared to the one present in your `.swift-version` file (`#{dot_swift_version}`). " \
+          message = "Specification `#{spec.name}` specifies inconsistent `swift_versions` (#{spec_swift_versions.map { |s| "`#{s}`" }.to_sentence}) compared to the one present in your `.swift-version` file (`#{dot_swift_version}`). " \
                     'Please remove the `.swift-version` file which is now deprecated and only use the `swift_versions` attribute within your podspec.'
         elsif !swift_version.nil? && !spec_swift_versions.include?(swift_version)
-          message = "Specification `#{spec.name}` specifies inconsistent `swift_versions` (#{spec_swift_versions.map { |s| "`#{s}`" }.join(', ')}) compared to the one passed during lint (`#{swift_version}`)."
+          message = "Specification `#{spec.name}` specifies inconsistent `swift_versions` (#{spec_swift_versions.map { |s| "`#{s}`" }.to_sentence}) compared to the one passed during lint (`#{swift_version}`)."
         end
         unless message.nil?
           error('swift', message)
@@ -501,12 +504,21 @@ module Pod
         end
       end
 
-      if swift_version.nil? && spec_swift_versions.empty? && dot_swift_version.nil?
-        warning('swift',
-                'The validator used ' \
-                "Swift `#{DEFAULT_SWIFT_VERSION}` by default because no Swift version was specified. " \
-                'To specify a Swift version during validation, add the `swift_versions` attribute in your podspec. ' \
-                'Note that usage of the `--swift-version` parameter or a `.swift-version` file is now deprecated.')
+      if swift_version.nil? && spec.swift_versions.empty?
+        if !dot_swift_version.nil?
+          # The user will be warned to delete the `.swift-version` file in favor of the `swift_versions` DSL attribute.
+          # This is intentionally not a lint warning since we do not want to break existing setups and instead just soft
+          # deprecate this slowly.
+          #
+          UI.warn 'Usage of the `.swift_version` file has been deprecated! Please delete the file and use the ' \
+            "`swift_versions` attribute within your podspec instead.\n".yellow
+        else
+          warning('swift',
+                  'The validator used ' \
+                  "Swift `#{DEFAULT_SWIFT_VERSION}` by default because no Swift version was specified. " \
+                  'To specify a Swift version during validation, add the `swift_versions` attribute in your podspec. ' \
+                  'Note that usage of a `.swift-version` file is now deprecated.')
+        end
       end
     end
 
@@ -547,6 +559,11 @@ module Pod
       app_project = Xcodeproj::Project.new(validation_dir + 'App.xcodeproj')
       app_target = Pod::Generator::AppTargetHelper.add_app_target(app_project, consumer.platform_name, deployment_target)
       Pod::Generator::AppTargetHelper.add_swift_version(app_target, derived_swift_version)
+      # Lint will fail if a AppIcon is set but no image is found with such name
+      # Happens only with Static Frameworks enabled but shouldn't be set anyway
+      app_target.build_configurations.each do |config|
+        config.build_settings.delete('ASSETCATALOG_COMPILER_APPICON_NAME')
+      end
       app_project.save
       app_project.recreate_user_schemes
     end
@@ -554,7 +571,7 @@ module Pod
     def add_app_project_import
       app_project = Xcodeproj::Project.open(validation_dir + 'App.xcodeproj')
       app_target = app_project.targets.first
-      pod_target = @installer.pod_targets.find { |pt| pt.pod_name == spec.root.name }
+      pod_target = validation_pod_target
       Pod::Generator::AppTargetHelper.add_app_project_import(app_project, app_target, pod_target, consumer.platform_name)
       Pod::Generator::AppTargetHelper.add_xctest_search_paths(app_target) if @installer.pod_targets.any? { |pt| pt.spec_consumers.any? { |c| c.frameworks.include?('XCTest') } }
       Pod::Generator::AppTargetHelper.add_empty_swift_file(app_project, app_target) if @installer.pod_targets.any?(&:uses_swift?)
@@ -562,6 +579,12 @@ module Pod
       Xcodeproj::XCScheme.share_scheme(app_project.path, 'App')
       # Share the pods xcscheme only if it exists. For pre-built vendored pods there is no xcscheme generated.
       Xcodeproj::XCScheme.share_scheme(@installer.pods_project.path, pod_target.label) if shares_pod_target_xcscheme?(pod_target)
+    end
+
+    # Returns the pod target for the pod being validated. Installation must have occurred before this can be invoked.
+    #
+    def validation_pod_target
+      @installer.pod_targets.find { |pt| pt.pod_name == spec.root.name }
     end
 
     # It creates a podfile in memory and builds a library containing the pod
@@ -582,12 +605,20 @@ module Pod
         native_target = pod_target_installation_result.native_target
         native_target.build_configuration_list.build_configurations.each do |build_configuration|
           (build_configuration.build_settings['OTHER_CFLAGS'] ||= '$(inherited)') << ' -Wincomplete-umbrella'
-          build_configuration.build_settings['SWIFT_VERSION'] = (pod_target.swift_version || derived_swift_version) if pod_target.uses_swift?
+          if pod_target.uses_swift?
+            # The Swift version for the target being validated can be overridden by `--swift-version` or the
+            # `.swift-version` file so we always use the derived Swift version. For dependencies, we always use the
+            # Swift version they specify, unless they don't in which case it will be inferred by the target that is
+            # integrating them.
+            swift_version = pod_target == validation_pod_target ? derived_swift_version : pod_target.swift_version
+            build_configuration.build_settings['SWIFT_VERSION'] = swift_version
+          end
         end
-        pod_target_installation_result.test_specs_by_native_target.each do |test_native_target, test_specs|
-          if pod_target.uses_swift_for_non_library_spec?(test_specs.first)
+        pod_target_installation_result.test_specs_by_native_target.each do |test_native_target, test_spec|
+          if pod_target.uses_swift_for_spec?(test_spec)
             test_native_target.build_configuration_list.build_configurations.each do |build_configuration|
-              build_configuration.build_settings['SWIFT_VERSION'] = derived_swift_version
+              swift_version = pod_target == validation_pod_target ? derived_swift_version : pod_target.swift_version
+              build_configuration.build_settings['SWIFT_VERSION'] = swift_version
             end
           end
         end
@@ -628,15 +659,25 @@ module Pod
       else
         UI.message "\nBuilding with `xcodebuild`.\n".yellow do
           scheme = if skip_import_validation?
-                     pod_target = @installer.pod_targets.find { |pt| pt.pod_name == spec.root.name }
-                     pod_target.label if pod_target.should_build?
+                     validation_pod_target.label if validation_pod_target.should_build?
                    else
                      'App'
                    end
           if scheme.nil?
             UI.warn "Skipping compilation with `xcodebuild` because target contains no sources.\n".yellow
           else
-            output = xcodebuild('build', scheme, 'Release')
+            if analyze
+              output = xcodebuild('analyze', scheme, 'Release')
+              find_output = Executable.execute_command('find', [validation_dir, '-name', '*.html'], false)
+              if find_output != ''
+                message = 'Static Analysis failed.'
+                message += ' You can use `--verbose` for more information.' unless config.verbose?
+                message += ' You can use `--no-clean` to save a reproducible buid environment.' unless no_clean
+                error('build_pod', message)
+              end
+            else
+              output = xcodebuild('build', scheme, 'Release')
+            end
             parsed_output = parse_xcodebuild_output(output)
             translate_output_to_linter_messages(parsed_output)
           end
@@ -656,7 +697,7 @@ module Pod
         UI.warn "Skipping test validation with `xcodebuild` because it can't be found.\n".yellow
       else
         UI.message "\nTesting with `xcodebuild`.\n".yellow do
-          pod_target = @installer.pod_targets.find { |pt| pt.pod_name == spec.root.name }
+          pod_target = validation_pod_target
           consumer.spec.test_specs.each do |test_spec|
             if !test_spec.supported_on_platform?(consumer.platform_name)
               UI.warn "Skipping test spec `#{test_spec.name}` on platform `#{consumer.platform_name}` since it is not supported.\n".yellow
@@ -883,6 +924,10 @@ module Pod
       podspec  = file.realpath
       local    = local?
       urls     = source_urls
+
+      additional_podspec_pods = external_podspecs ? Dir.glob(external_podspecs) : []
+      additional_path_pods = (include_podspecs ? Dir.glob(include_podspecs) : []) .select { |path| spec.name != Specification.from_file(path).name } - additional_podspec_pods
+
       Pod::Podfile.new do
         install! 'cocoapods', :deterministic_uuids => false
         # By default inhibit warnings for all pods, except the one being validated.
@@ -897,6 +942,17 @@ module Pod
           else
             pod name, :podspec => podspec.to_s, :inhibit_warnings => false
           end
+
+          additional_path_pods.each do |podspec_path|
+            podspec_name = File.basename(podspec_path, '.*')
+            pod podspec_name, :path => File.dirname(podspec_path)
+          end
+
+          additional_podspec_pods.each do |podspec_path|
+            podspec_name = File.basename(podspec_path, '.*')
+            pod podspec_name, :podspec => podspec_path
+          end
+
           test_spec_names.each do |test_spec_name|
             if local
               pod test_spec_name, :path => podspec.dirname.to_s, :inhibit_warnings => false
@@ -957,6 +1013,10 @@ module Pod
       when :tvos
         command += %w(CODE_SIGN_IDENTITY=- -sdk appletvsimulator)
         command += Fourflusher::SimControl.new.destination(:oldest, 'tvOS', deployment_target)
+      end
+
+      if analyze
+        command += %w(CLANG_ANALYZER_OUTPUT=html CLANG_ANALYZER_OUTPUT_DIR=analyzer)
       end
 
       begin

@@ -42,6 +42,7 @@ module Pod
           #
           def install!
             refresh_file_accessors
+            prepare_pod_groups
             add_source_files_references
             add_frameworks_bundles
             add_vendored_libraries
@@ -65,6 +66,19 @@ module Pod
           #
           def refresh_file_accessors
             file_accessors.map(&:path_list).uniq.each(&:read_file_system)
+          end
+
+          # Prepares the main groups to which all files will be added for the respective target
+          #
+          def prepare_pod_groups
+            file_accessors.each do |file_accessor|
+              pod_name = file_accessor.spec.name
+              next unless sandbox.local?(pod_name)
+              root_name = Specification.root_name(pod_name)
+              path = file_accessor.root
+              group = pods_project.group_for_spec(root_name)
+              group.set_path(path) unless group.path == path
+            end
           end
 
           # Adds the source files of the Pods to the Pods project.
@@ -146,29 +160,19 @@ module Pod
                 # sandbox.
                 next if pod_target.build_as_framework? && pod_target.should_build?
 
-                headers_sandbox = Pathname.new(pod_target.pod_name)
-                added_build_headers = false
-                added_public_headers = false
-
-                file_accessors = pod_target.file_accessors.reject { |fa| fa.spec.non_library_specification? }
-                file_accessors.each do |file_accessor|
-                  # Private headers will always end up in Pods/Headers/Private/PodA/*.h
-                  # This will allow for `""` imports to work.
-                  header_mappings(headers_sandbox, file_accessor, file_accessor.headers).each do |namespaced_path, files|
-                    added_build_headers = true
+                pod_target_header_mappings = pod_target.header_mappings_by_file_accessor.values
+                pod_target_header_mappings.each do |header_mappings|
+                  header_mappings.each do |namespaced_path, files|
                     pod_target.build_headers.add_files(namespaced_path, files)
-                  end
-
-                  # Public headers on the other hand will be added in Pods/Headers/Public/PodA/PodA/*.h
-                  # The extra folder is intentional in order for `<>` imports to work.
-                  header_mappings(headers_sandbox, file_accessor, file_accessor.public_headers).each do |namespaced_path, files|
-                    added_public_headers = true
-                    sandbox.public_headers.add_files(namespaced_path, files)
                   end
                 end
 
-                pod_target.build_headers.add_search_path(headers_sandbox, pod_target.platform) if added_build_headers
-                sandbox.public_headers.add_search_path(headers_sandbox, pod_target.platform) if added_public_headers
+                public_header_mappings = pod_target.public_header_mappings_by_file_accessor.values
+                public_header_mappings.each do |header_mappings|
+                  header_mappings.each do |namespaced_path, files|
+                    sandbox.public_headers.add_files(namespaced_path, files)
+                  end
+                end
               end
             end
           end
@@ -209,11 +213,11 @@ module Pod
               next if paths.empty?
 
               pod_name = file_accessor.spec.name
-              preserve_pod_file_structure_flag = (sandbox.local?(pod_name) || preserve_pod_file_structure)
+              preserve_pod_file_structure_flag = (sandbox.local?(pod_name) || preserve_pod_file_structure) && reflect_file_system_structure
               base_path = preserve_pod_file_structure_flag ? common_path(paths) : nil
               group = pods_project.group_for_spec(pod_name, group_key)
               paths.each do |path|
-                pods_project.add_file_reference(path, group, preserve_pod_file_structure_flag && reflect_file_system_structure, base_path)
+                pods_project.add_file_reference(path, group, preserve_pod_file_structure_flag, base_path)
               end
             end
           end
@@ -292,44 +296,6 @@ module Pod
             result = Pathname.new(min[0...idx].join('/'))
             # Don't consider "/" a common path
             return result unless result.to_s == '' || result.to_s == '/'
-          end
-
-          # Computes the destination sub-directory in the sandbox
-          #
-          # @param  [Pathname] headers_sandbox
-          #         The sandbox where the header links should be stored for this
-          #         Pod.
-          #
-          # @param  [Sandbox::FileAccessor] file_accessor
-          #         The consumer file accessor for which the headers need to be
-          #         linked.
-          #
-          # @param  [Array<Pathname>] headers
-          #         The absolute paths of the headers which need to be mapped.
-          #
-          # @return [Hash{Pathname => Array<Pathname>}] A hash containing the
-          #         headers folders as the keys and the absolute paths of the
-          #         header files as the values.
-          #
-          def header_mappings(headers_sandbox, file_accessor, headers)
-            consumer = file_accessor.spec_consumer
-            header_mappings_dir = consumer.header_mappings_dir
-            dir = headers_sandbox
-            dir += consumer.header_dir if consumer.header_dir
-
-            mappings = {}
-            headers.each do |header|
-              next if header.to_s.include?('.framework/')
-
-              sub_dir = dir
-              if header_mappings_dir
-                relative_path = header.relative_path_from(file_accessor.path_list.root + header_mappings_dir)
-                sub_dir += relative_path.dirname
-              end
-              mappings[sub_dir] ||= []
-              mappings[sub_dir] << header
-            end
-            mappings
           end
 
           #-----------------------------------------------------------------------#

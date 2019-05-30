@@ -31,16 +31,12 @@ module Pod
           #
           def integrate!
             UI.section(integration_message) do
-              target_installation_result.non_library_specs_by_native_target.each do |native_target, specs|
-                specs.each do |spec|
-                  add_embed_frameworks_script_phase(native_target, spec)
-                  add_copy_resources_script_phase(native_target, spec)
-                end
-                UserProjectIntegrator::TargetIntegrator.create_or_update_user_script_phases(script_phases_for_specs(specs), native_target)
+              target_installation_result.non_library_specs_by_native_target.each do |native_target, spec|
+                add_embed_frameworks_script_phase(native_target, spec)
+                add_copy_resources_script_phase(native_target, spec)
+                UserProjectIntegrator::TargetIntegrator.create_or_update_user_script_phases(script_phases_for_specs(spec), native_target)
               end
-
-              specs = target.library_specs
-              UserProjectIntegrator::TargetIntegrator.create_or_update_user_script_phases(script_phases_for_specs(specs), target_installation_result.native_target)
+              UserProjectIntegrator::TargetIntegrator.create_or_update_user_script_phases(script_phases_for_specs(target.library_specs), target_installation_result.native_target)
             end
           end
 
@@ -77,12 +73,12 @@ module Pod
               end.uniq
 
               unless resource_paths.empty?
-                input_file_list_path = target.embed_frameworks_script_input_files_path_for_spec(spec)
+                input_file_list_path = target.copy_resources_script_input_files_path_for_spec(spec)
                 input_file_list_relative_path = "${PODS_ROOT}/#{input_file_list_path.relative_path_from(target.sandbox.root)}"
                 input_paths_key = UserProjectIntegrator::TargetIntegrator::XCFileListConfigKey.new(input_file_list_path, input_file_list_relative_path)
                 input_paths_by_config[input_paths_key] = [script_path] + resource_paths
 
-                output_file_list_path = target.embed_frameworks_script_output_files_path_for_spec(spec)
+                output_file_list_path = target.copy_resources_script_output_files_path_for_spec(spec)
                 output_file_list_relative_path = "${PODS_ROOT}/#{output_file_list_path.relative_path_from(target.sandbox.root)}"
                 output_paths_key = UserProjectIntegrator::TargetIntegrator::XCFileListConfigKey.new(output_file_list_path, output_file_list_relative_path)
                 output_paths_by_config[output_paths_key] = UserProjectIntegrator::TargetIntegrator.resource_output_paths(resource_paths)
@@ -145,13 +141,13 @@ module Pod
             target_installation_result.target
           end
 
-          # @param [Array<Specification] specs
+          # @param [Specification, Array<Specification>] specs
           #         the specs to return script phrases from.
           #
           # @return [Array<Hash<Symbol=>String>] an array of all combined script phases from the specs.
           #
           def script_phases_for_specs(specs)
-            specs.flat_map { |spec| spec.consumer(target.platform).script_phases }
+            Array(specs).flat_map { |spec| spec.consumer(target.platform).script_phases }
           end
         end
       end

@@ -22,7 +22,8 @@ module Pod
               @native_target = stub('NativeTarget', :shell_script_build_phases => [], :build_phases => [],
                                                     :project => @project)
               @test_native_target = stub('TestNativeTarget', :symbol_type => :unit_test_bundle, :build_phases => [],
-                                                             :shell_script_build_phases => [], :project => @project, :name => 'CoconutLib-Unit-Tests')
+                                                             :shell_script_build_phases => [], :project => @project,
+                                                             :name => 'CoconutLib-Unit-Tests')
 
               @target_installation_result = TargetInstallationResult.new(@coconut_pod_target, @native_target, [],
                                                                          [@test_native_target])
@@ -80,6 +81,32 @@ module Pod
                 ]
                 @test_native_target.build_phases[1].output_paths.should == [
                   '${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/TestResourceBundle.bundle',
+                ]
+              end
+
+              it 'integrates test native targets with frameworks and resource script phase input and output file lists' do
+                @project.stubs(:object_version).returns('50')
+                framework_paths = [Target::FrameworkPaths.new('${PODS_ROOT}/Vendored/Vendored.framework')]
+                resource_paths = ['${PODS_CONFIGURATION_BUILD_DIR}/TestResourceBundle.bundle']
+                @coconut_pod_target.stubs(:framework_paths).returns('CoconutLib' => framework_paths)
+                @coconut_pod_target.stubs(:resource_paths).returns('CoconutLib' => resource_paths)
+                PodTargetIntegrator.new(@target_installation_result, :use_input_output_paths => true).integrate!
+                @test_native_target.build_phases.count.should == 2
+                @test_native_target.build_phases.map(&:display_name).should == [
+                  '[CP] Embed Pods Frameworks',
+                  '[CP] Copy Pods Resources',
+                ]
+                @test_native_target.build_phases[0].input_file_list_paths.should == [
+                  '${PODS_ROOT}/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-frameworks-input-files.xcfilelist',
+                ]
+                @test_native_target.build_phases[0].output_file_list_paths.should == [
+                  '${PODS_ROOT}/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-frameworks-output-files.xcfilelist',
+                ]
+                @test_native_target.build_phases[1].input_file_list_paths.should == [
+                  '${PODS_ROOT}/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-resources-input-files.xcfilelist',
+                ]
+                @test_native_target.build_phases[1].output_file_list_paths.should == [
+                  '${PODS_ROOT}/Target Support Files/CoconutLib/CoconutLib-Unit-Tests-resources-output-files.xcfilelist',
                 ]
               end
 

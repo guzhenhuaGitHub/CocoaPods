@@ -58,6 +58,13 @@ module Pod
           frameworks_search_paths = xcconfig.framework_search_paths
           frameworks_search_paths.should == %w($(PLATFORM_DIR)/Developer/Library/Frameworks)
         end
+
+        it 'adds the developer frameworks search paths to the xcconfig if XCTest has been detected as a weak framework' do
+          xcconfig = BuildSettings.new(stub('Target'))
+          xcconfig.stubs(:weak_frameworks => %w(XCTest))
+          frameworks_search_paths = xcconfig.framework_search_paths
+          frameworks_search_paths.should == %w($(PLATFORM_DIR)/Developer/Library/Frameworks)
+        end
       end
 
       #---------------------------------------------------------------------#
@@ -84,6 +91,26 @@ module Pod
           build_settings = pod(target)
           other_swift_flags = build_settings.xcconfig.to_hash['OTHER_SWIFT_FLAGS']
           other_swift_flags.should.include '-suppress-warnings'
+        end
+      end
+
+      #---------------------------------------------------------------------#
+
+      describe '#merge_spec_xcconfig_into_xcconfig' do
+        before do
+          @build_settings = BuildSettings.new(stub('Target'))
+          @xcconfig = Xcodeproj::Config.new
+        end
+
+        it 'merges into an empty xcconfig' do
+          @build_settings.send(:merge_spec_xcconfig_into_xcconfig, { 'A' => 'A', 'OTHER_LDFLAGS' => '-f Frame', 'EMPTY' => '' }, @xcconfig)
+          @xcconfig.to_hash.should == { 'A' => 'A', 'OTHER_LDFLAGS' => '-f Frame', 'EMPTY' => '' }
+        end
+
+        it 'merges into an xcconfig with overlapping settings' do
+          @xcconfig.merge!('A' => 'NOT A', 'OTHER_LDFLAGS' => '-lLib', 'B' => 'B', 'FRAMEWORK_SEARCH_PATHS' => 'FWSP')
+          @build_settings.send(:merge_spec_xcconfig_into_xcconfig, { 'A' => 'A', 'OTHER_LDFLAGS' => %w(-f Frame), 'EMPTY' => [] }, @xcconfig)
+          @xcconfig.to_hash.should == { 'A' => 'A', 'B' => 'B', 'FRAMEWORK_SEARCH_PATHS' => 'FWSP', 'OTHER_LDFLAGS' => '-f Frame -l"Lib"', 'EMPTY' => [] }
         end
       end
 

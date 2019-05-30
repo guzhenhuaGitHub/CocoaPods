@@ -13,6 +13,9 @@ module Pod
         require 'cocoapods/installer/xcode/pods_project_generator/aggregate_target_installer'
         require 'cocoapods/installer/xcode/pods_project_generator/project_generator'
         require 'cocoapods/installer/xcode/pods_project_generator_result'
+        require 'cocoapods/installer/xcode/pods_project_generator/aggregate_target_dependency_installer'
+        require 'cocoapods/installer/xcode/pods_project_generator/pod_target_dependency_installer'
+        require 'cocoapods/native_target_extension.rb'
 
         # @return [Sandbox] The sandbox where the Pods should be installed.
         #
@@ -28,10 +31,9 @@ module Pod
         #
         attr_reader :pod_targets
 
-        # @return [Analyzer] the analyzer which provides the information about what
-        #         needs to be installed.
+        # @return [Hash{String => Symbol}] The build configurations that need to be installed.
         #
-        attr_reader :analysis_result
+        attr_reader :build_configurations
 
         # @return [InstallationOptions] the installation options from the Podfile.
         #
@@ -41,43 +43,52 @@ module Pod
         #
         attr_reader :config
 
+        # @return [Integer] the object version for the projects we will generate.
+        #
+        attr_reader :project_object_version
+
+        # @return [ProjectMetadataCache] the metadata cache used to reconstruct target dependencies.
+        #
+        attr_reader :metadata_cache
+
         # Initialize a new instance
         #
-        # @param  [Sandbox]                sandbox               @see #sandbox
-        # @param  [Array<AggregateTarget>] aggregate_targets     @see #aggregate_targets
-        # @param  [Array<PodTarget>]       pod_targets           @see #pod_targets
-        # @param  [Analyzer]               analysis_result       @see #analysis_result
-        # @param  [InstallationOptions]    installation_options  @see #installation_options
-        # @param  [Config]                 config                @see #config
+        # @param  [Sandbox]                sandbox                @see #sandbox
+        # @param  [Array<AggregateTarget>] aggregate_targets      @see #aggregate_targets
+        # @param  [Array<PodTarget>]       pod_targets            @see #pod_targets
+        # @param  [Hash{String => Symbol}] build_configurations   @see #build_configurations
+        # @param  [InstallationOptions]    installation_options   @see #installation_options
+        # @param  [Config]                 config                 @see #config
+        # @param  [Integer]                project_object_version @see #project_object_version
+        # @param  [ProjectMetadataCache]   metadata_cache         @see #metadata_cache
         #
-        def initialize(sandbox, aggregate_targets, pod_targets, analysis_result, installation_options, config)
+        def initialize(sandbox, aggregate_targets, pod_targets, build_configurations, installation_options, config,
+                       project_object_version, metadata_cache = nil)
           @sandbox = sandbox
           @aggregate_targets = aggregate_targets
           @pod_targets = pod_targets
-          @analysis_result = analysis_result
+          @build_configurations = build_configurations
           @installation_options = installation_options
           @config = config
+          @project_object_version = project_object_version
+          @metadata_cache = metadata_cache
         end
 
-        # Shares schemes of development Pods.
+        # Configure schemes for the specified project and pod targets. Schemes for development pods will be shared
+        # if requested by the integration.
+        #
+        # @param [PBXProject] project The project to configure schemes for.
+        # @param [Array<PodTarget>] pod_targets The pod targets within that project to configure their schemes.
         #
         # @return [void]
         #
-        def share_development_pod_schemes(project, development_pod_targets = [])
-          targets = development_pod_targets.select do |target|
-            target.should_build? && share_scheme_for_development_pod?(target.pod_name)
-          end
-          targets.each do |pod_target|
-            Xcodeproj::XCScheme.share_scheme(project.path, pod_target.label)
-            pod_target.test_specs.each do |test_spec|
-              Xcodeproj::XCScheme.share_scheme(project.path, pod_target.test_target_label(test_spec))
-            end
-
-            pod_target.app_specs.each do |app_spec|
-              Xcodeproj::XCScheme.share_scheme(project.path, pod_target.app_target_label(app_spec))
-            end
+        def configure_schemes(project, pod_targets)
+          pod_targets.each do |pod_target|
+            share_scheme = pod_target.should_build? && share_scheme_for_development_pod?(pod_target.pod_name) && sandbox.local?(pod_target.pod_name)
+            configure_schemes_for_pod_target(project, pod_target, share_scheme)
           end
         end
+
         # @!attribute [Hash{String => TargetInstallationResult}] pod_target_installation_results
         # @!attribute [Hash{String => TargetInstallationResult}] aggregate_target_installation_results
         InstallationResults = Struct.new(:pod_target_installation_results, :aggregate_target_installation_results)
@@ -173,93 +184,10 @@ module Pod
           pod_target_installation_results_hash = target_installation_results.pod_target_installation_results
           aggregate_target_installation_results_hash = target_installation_results.aggregate_target_installation_results
 
-          # Wire up aggregate targets
-          aggregate_target_installation_results_hash.values.each do |aggregate_target_installation_result|
-            aggregate_target = aggregate_target_installation_result.target
-            aggregate_native_target = aggregate_target_installation_result.native_target
-            is_app_extension = !(aggregate_target.user_targets.map(&:symbol_type) &
-                [:app_extension, :watch_extension, :watch2_extension, :tv_extension, :messages_extension]).empty?
-            is_app_extension ||= aggregate_target.user_targets.any? { |ut| ut.common_resolved_build_setting('APPLICATION_EXTENSION_API_ONLY') == 'YES' }
-            configure_app_extension_api_only_to_native_target(aggregate_native_target) if is_app_extension
-            # Wire up dependencies that are part of inherit search paths for this aggregate target.
-            aggregate_target.search_paths_aggregate_targets.each do |search_paths_target|
-              aggregate_native_target.add_dependency(aggregate_target_installation_results_hash[search_paths_target.name].native_target)
-            end
-            # Wire up all pod target dependencies to aggregate target.
-            aggregate_target.pod_targets.each do |pod_target|
-              pod_target_native_target = pod_target_installation_results_hash[pod_target.name].native_target
-              aggregate_native_target.add_dependency(pod_target_native_target)
-              configure_app_extension_api_only_to_native_target(pod_target_native_target) if is_app_extension
-            end
-          end
+          AggregateTargetDependencyInstaller.new(sandbox, aggregate_target_installation_results_hash,
+                                                 pod_target_installation_results_hash, metadata_cache).install!
 
-          # Wire up pod targets
-          pod_target_installation_results_hash.values.each do |pod_target_installation_result|
-            pod_target = pod_target_installation_result.target
-            native_target = pod_target_installation_result.native_target
-            project = native_target.project
-            frameworks_group = project.frameworks_group
-            # First, wire up all resource bundles.
-            pod_target_installation_result.resource_bundle_targets.each do |resource_bundle_target|
-              native_target.add_dependency(resource_bundle_target)
-              if pod_target.build_as_dynamic_framework? && pod_target.should_build?
-                native_target.add_resources([resource_bundle_target.product_reference])
-              end
-            end
-            # Wire up all dependencies to this pod target, if any.
-            dependent_targets = pod_target.dependent_targets
-            dependent_targets.each do |dependent_target|
-              dependent_project = pod_target_installation_results_hash[dependent_target.name].native_target.project
-              if dependent_project != project
-                project.add_subproject_reference(dependent_project, project.dependencies_group)
-              end
-              native_target.add_dependency(pod_target_installation_results_hash[dependent_target.name].native_target)
-              add_framework_file_reference_to_native_target(native_target, pod_target, dependent_target, frameworks_group)
-            end
-            # Wire up test native targets.
-            unless pod_target_installation_result.test_native_targets.empty?
-              pod_target_installation_result.test_specs_by_native_target.each do |test_native_target, test_specs|
-                test_dependent_targets = test_specs.flat_map { |s| pod_target.test_dependent_targets_by_spec_name[s.name] }.compact.unshift(pod_target).uniq
-                test_dependent_targets.each do |test_dependent_target|
-                  dependency_installation_result = pod_target_installation_results_hash[test_dependent_target.name]
-                  resource_bundle_native_targets = dependency_installation_result.test_resource_bundle_targets[test_specs.first.name]
-                  unless resource_bundle_native_targets.nil?
-                    resource_bundle_native_targets.each do |test_resource_bundle_target|
-                      test_native_target.add_dependency(test_resource_bundle_target)
-                    end
-                  end
-                  dependent_test_project = pod_target_installation_results_hash[test_dependent_target.name].native_target.project
-                  if dependent_test_project != project
-                    project.add_subproject_reference(dependent_test_project, project.dependencies_group)
-                  end
-                  test_native_target.add_dependency(dependency_installation_result.native_target)
-                  add_framework_file_reference_to_native_target(test_native_target, pod_target, test_dependent_target, frameworks_group)
-                end
-              end
-            end
-
-            # Wire up app native targets.
-            unless pod_target_installation_result.app_native_targets.empty?
-              pod_target_installation_result.app_specs_by_native_target.each do |app_native_target, app_specs|
-                app_dependent_targets = app_specs.flat_map { |s| pod_target.app_dependent_targets_by_spec_name[s.name] }.compact.unshift(pod_target).uniq
-                app_dependent_targets.each do |app_dependent_target|
-                  dependency_installation_result = pod_target_installation_results_hash[app_dependent_target.name]
-                  resource_bundle_native_targets = dependency_installation_result.app_resource_bundle_targets[app_specs.first.name]
-                  unless resource_bundle_native_targets.nil?
-                    resource_bundle_native_targets.each do |app_resource_bundle_target|
-                      app_native_target.add_dependency(app_resource_bundle_target)
-                    end
-                  end
-                  dependency_project = dependency_installation_result.native_target.project
-                  if dependency_project != project
-                    project.add_subproject_reference(dependency_project, project.dependencies_group)
-                  end
-                  app_native_target.add_dependency(dependency_installation_result.native_target)
-                  add_framework_file_reference_to_native_target(app_native_target, pod_target, app_dependent_target, frameworks_group)
-                end
-              end
-            end
-          end
+          PodTargetDependencyInstaller.new(sandbox, pod_target_installation_results_hash, metadata_cache).install!
         end
 
         # @param  [String] pod The root name of the development pod.
@@ -290,20 +218,27 @@ module Pod
           end
         end
 
-        def add_framework_file_reference_to_native_target(native_target, pod_target, dependent_target, frameworks_group)
-          if pod_target.should_build? && pod_target.build_as_dynamic? && dependent_target.should_build?
-            product_ref = frameworks_group.files.find { |f| f.path == dependent_target.product_name } ||
-                frameworks_group.new_product_ref_for_target(dependent_target.product_basename, dependent_target.product_type)
-            native_target.frameworks_build_phase.add_file_reference(product_ref, true)
-          end
-        end
-
-        # Sets the APPLICATION_EXTENSION_API_ONLY build setting to YES for all
-        # configurations of the given native target.
-        #
-        def configure_app_extension_api_only_to_native_target(native_target)
-          native_target.build_configurations.each do |config|
-            config.build_settings['APPLICATION_EXTENSION_API_ONLY'] = 'YES'
+        def configure_schemes_for_pod_target(project, pod_target, share_scheme)
+          specs = [pod_target.root_spec] + pod_target.test_specs + pod_target.app_specs
+          specs.each do |spec|
+            scheme_name = spec.spec_type == :library ? pod_target.label : pod_target.non_library_spec_label(spec)
+            scheme_configuration = pod_target.scheme_for_spec(spec)
+            unless scheme_configuration.empty?
+              scheme_path = Xcodeproj::XCScheme.user_data_dir(project.path) + "#{scheme_name}.xcscheme"
+              scheme = Xcodeproj::XCScheme.new(scheme_path)
+              command_line_arguments = scheme.launch_action.command_line_arguments
+              scheme_configuration.fetch(:launch_arguments, []).each do |launch_arg|
+                command_line_arguments.assign_argument(:argument => launch_arg, :enabled => true)
+              end
+              scheme.launch_action.command_line_arguments = command_line_arguments
+              environment_variables = scheme.launch_action.environment_variables
+              scheme_configuration.fetch(:environment_variables, {}).each do |k, v|
+                environment_variables.assign_variable(:key => k, :value => v)
+              end
+              scheme.launch_action.environment_variables = environment_variables
+              scheme.save!
+            end
+            Xcodeproj::XCScheme.share_scheme(project.path, scheme_name) if share_scheme
           end
         end
       end

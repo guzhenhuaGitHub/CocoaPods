@@ -94,6 +94,51 @@ module Pod
 
         @pod_target.should_build?.should == false
       end
+
+      describe '#headers_sandbox' do
+        it 'returns the correct path' do
+          @pod_target.headers_sandbox.should == Pathname.new('BananaLib')
+        end
+
+        it 'returns the correct path when a custom module name is set' do
+          @pod_target.stubs(:product_module_name).returns('BananaLibModule')
+          @pod_target.headers_sandbox.should == Pathname.new('BananaLib')
+        end
+
+        it 'returns the correct path when headers_dir is set' do
+          @pod_target.stubs(:product_module_name).returns('BananaLibModule')
+          @file_accessor = @pod_target.file_accessors.first
+          @file_accessor.spec_consumer.stubs(:header_dir).returns('Sub_dir')
+          @pod_target.headers_sandbox.should == Pathname.new('BananaLib')
+        end
+      end
+
+      describe '#build_settings_for_spec' do
+        before do
+          @watermelon_spec = fixture_spec('grapefruits-lib/GrapefruitsLib.podspec')
+          @pod_target = fixture_pod_target_with_specs([@watermelon_spec, *@watermelon_spec.recursive_subspecs],
+                                                      true, {}, [], Platform.new(:ios, '6.0'),
+                                                      [@target_definition])
+        end
+
+        it 'raises when the target does not contain the spec' do
+          -> { @pod_target.build_settings_for_spec(stub('spec', :spec_type => :test, :name => 'Test/Test')) }.should.raise(ArgumentError, /No build settings for/)
+        end
+
+        it 'returns the build settings for a library spec' do
+          @pod_target.build_settings_for_spec(@watermelon_spec).should.equal @pod_target.build_settings
+        end
+
+        it 'returns the build settings for a test spec' do
+          test_spec = @watermelon_spec.recursive_subspecs.find { |s| s.name == 'GrapefruitsLib/Tests' }
+          @pod_target.build_settings_for_spec(test_spec).non_library_spec.should == test_spec
+        end
+
+        it 'returns the build settings for an app spec' do
+          app_spec = @watermelon_spec.recursive_subspecs.find { |s| s.name == 'GrapefruitsLib/App' }
+          @pod_target.build_settings_for_spec(app_spec).non_library_spec.should == app_spec
+        end
+      end
     end
 
     describe 'target version' do
@@ -494,6 +539,50 @@ module Pod
         end
       end
 
+      describe '#header_mappings' do
+        before do
+          @file_accessor = @pod_target.file_accessors.first
+        end
+
+        it 'returns the correct public header mappings' do
+          headers = [Pathname.new('Banana.h')]
+          mappings = @pod_target.send(:header_mappings, @file_accessor, headers)
+          mappings.should == {
+            Pathname.new('BananaLib') => [Pathname.new('Banana.h')],
+          }
+        end
+
+        it 'takes into account the header dir specified in the spec for public headers' do
+          headers = [Pathname.new('Banana.h')]
+          @file_accessor.spec_consumer.stubs(:header_dir).returns('Sub_dir')
+          mappings = @pod_target.send(:header_mappings, @file_accessor, headers)
+          mappings.should == {
+            Pathname.new('BananaLib/Sub_dir') => [Pathname.new('Banana.h')],
+          }
+        end
+
+        it 'takes into account the header dir specified in the spec for private headers' do
+          headers = [Pathname.new('Banana.h')]
+          @file_accessor.spec_consumer.stubs(:header_dir).returns('Sub_dir')
+          mappings = @pod_target.send(:header_mappings, @file_accessor, headers)
+          mappings.should == {
+            Pathname.new('BananaLib/Sub_dir') => [Pathname.new('Banana.h')],
+          }
+        end
+
+        it 'takes into account the header mappings dir specified in the spec' do
+          header_1 = @file_accessor.root + 'BananaLib/sub_dir/dir_1/banana_1.h'
+          header_2 = @file_accessor.root + 'BananaLib/sub_dir/dir_2/banana_2.h'
+          headers = [header_1, header_2]
+          @file_accessor.spec_consumer.stubs(:header_mappings_dir).returns('BananaLib/sub_dir')
+          mappings = @pod_target.send(:header_mappings, @file_accessor, headers)
+          mappings.should == {
+            (@pod_target.headers_sandbox + 'dir_1') => [header_1],
+            (@pod_target.headers_sandbox + 'dir_2') => [header_2],
+          }
+        end
+      end
+
       describe 'With frameworks' do
         before do
           @pod_target = fixture_pod_target('orange-framework/OrangeFramework.podspec', true)
@@ -531,10 +620,16 @@ module Pod
 
       describe 'With dependencies' do
         before do
-          @pod_dependency = fixture_pod_target('orange-framework/OrangeFramework.podspec', false, {}, [], Platform.ios, @pod_target.target_definitions)
-          @test_pod_dependency = fixture_pod_target('matryoshka/matryoshka.podspec', false, {}, [], Platform.ios, @pod_target.target_definitions)
+          @pod_dependency = fixture_pod_target('orange-framework/OrangeFramework.podspec', false, {}, [], Platform.ios,
+                                               @pod_target.target_definitions)
+          @test_pod_dependency = fixture_pod_target('matryoshka/matryoshka.podspec', false, {}, [], Platform.ios,
+                                                    @pod_target.target_definitions)
+          @app_pod_dependency = fixture_pod_target('monkey/monkey.podspec', false, {}, [], Platform.ios,
+                                                   @pod_target.target_definitions)
           @pod_target.dependent_targets = [@pod_dependency]
           @pod_target.test_dependent_targets_by_spec_name = { @pod_dependency.name => [@test_pod_dependency] }
+          @pod_target.app_dependent_targets_by_spec_name = { @pod_dependency.name => [@app_pod_dependency] }
+          @pod_target.test_app_hosts_by_spec_name = { @pod_dependency.name => [@test_pod_dependency.specs.first, @test_pod_dependency] }
         end
 
         it 'resolves simple dependencies' do
@@ -547,6 +642,15 @@ module Pod
           scoped_pod_target.first.dependent_targets.first.name.should == 'OrangeFramework-Pods'
           scoped_pod_target.first.test_dependent_targets_by_spec_name.count.should == 1
           scoped_pod_target.first.test_dependent_targets_by_spec_name['OrangeFramework'].first.name.should == 'matryoshka-Pods'
+          scoped_pod_target.first.app_dependent_targets_by_spec_name.count.should == 1
+          scoped_pod_target.first.app_dependent_targets_by_spec_name['OrangeFramework'].first.name.should == 'monkey-Pods'
+        end
+
+        it 'scopes test app host dependencies' do
+          scoped_pod_target = @pod_target.scoped
+          scoped_pod_target.first.test_app_hosts_by_spec_name.count.should == 1
+          scoped_pod_target.first.test_app_hosts_by_spec_name['OrangeFramework'].first.should == @test_pod_dependency.specs.first
+          scoped_pod_target.first.test_app_hosts_by_spec_name['OrangeFramework'].last.name.should == 'matryoshka-Pods'
         end
 
         describe 'With cyclic dependencies' do
@@ -574,6 +678,76 @@ module Pod
         it 'returns true if it contains test specifications' do
           @pod_target.root_spec.script_phase = { :name => 'Hello World', :script => 'echo "Hello World"' }
           @pod_target.contains_script_phases?.should == true
+        end
+      end
+
+      describe 'scheme support' do
+        before do
+          @watermelon_spec = fixture_spec('watermelon-lib/WatermelonLib.podspec')
+          @watermelon_spec.scheme = { :launch_arguments => %w(Arg1 Arg2), :environment_variables => { 'Key1' => 'Val1' } }
+          @watermelon_spec.test_specs.first.scheme = { :launch_arguments => ['TestArg1'] }
+          @pod_target = fixture_pod_target(@watermelon_spec)
+        end
+
+        it 'returns the correct scheme configuration for the requested spec' do
+          @pod_target.scheme_for_spec(@watermelon_spec).should == { :launch_arguments => %w(Arg1 Arg2), :environment_variables => { 'Key1' => 'Val1' } }
+          @pod_target.scheme_for_spec(@watermelon_spec.test_specs.first).should == { :launch_arguments => ['TestArg1'] }
+        end
+      end
+
+      describe 'resource and framework paths' do
+        before do
+          @watermelon_spec = fixture_spec('watermelon-lib/WatermelonLib.podspec')
+          @monkey_spec = fixture_spec('monkey/monkey.podspec')
+          @target_definition = Podfile::TargetDefinition.new('Pods', nil)
+          @target_definition.abstract = false
+          @watermelon_pod_target = fixture_pod_target_with_specs([@watermelon_spec, *@watermelon_spec.recursive_subspecs],
+                                                                 true, {}, [], Platform.new(:ios, '6.0'),
+                                                                 [@target_definition])
+          @monkey_pod_target = fixture_pod_target(@monkey_spec, true, {}, [], Platform.new(:ios, '6.0'),
+                                                  [@target_definition])
+        end
+
+        it 'returns the correct resource paths' do
+          @watermelon_pod_target.resource_paths.should == {
+            'WatermelonLib' => [],
+            'WatermelonLib/Tests' => ['${PODS_CONFIGURATION_BUILD_DIR}/WatermelonLibTestResources.bundle'],
+            'WatermelonLib/SnapshotTests' => [],
+            'WatermelonLib/App' => ['${PODS_CONFIGURATION_BUILD_DIR}/WatermelonLib/WatermelonLibExampleAppResources.bundle'],
+          }
+        end
+
+        it 'returns the correct resource paths for use_libraries' do
+          @watermelon_pod_target.stubs(:build_as_framework?).returns(false)
+          @watermelon_pod_target.resource_paths.should == {
+            'WatermelonLib' => [],
+            'WatermelonLib/Tests' => ['${PODS_ROOT}/../../spec/fixtures/watermelon-lib/App/resource.txt',
+                                      '${PODS_CONFIGURATION_BUILD_DIR}/WatermelonLibTestResources.bundle'],
+            'WatermelonLib/SnapshotTests' => [],
+            'WatermelonLib/App' => ['${PODS_ROOT}/../../spec/fixtures/watermelon-lib/App/resource.txt',
+                                    '${PODS_CONFIGURATION_BUILD_DIR}/WatermelonLib/WatermelonLibExampleAppResources.bundle'],
+          }
+        end
+
+        it 'returns the correct framework paths' do
+          @watermelon_pod_target.framework_paths.should == {
+            'WatermelonLib' => [
+              Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/WatermelonLib/WatermelonLib.framework'),
+            ],
+            'WatermelonLib/Tests' => [],
+            'WatermelonLib/SnapshotTests' => [],
+            'WatermelonLib/App' => [
+              Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/WatermelonLib/WatermelonLib.framework'),
+            ],
+          }
+        end
+
+        it 'returns correct vendored framework paths' do
+          @monkey_pod_target.framework_paths.should == {
+            'monkey' => [
+              Target::FrameworkPaths.new('${PODS_ROOT}/../../spec/fixtures/monkey/dynamic-monkey.framework', nil, []),
+            ],
+          }
         end
       end
 
@@ -620,27 +794,9 @@ module Pod
           @test_pod_target.info_plist_path_for_spec(@test_pod_target.test_specs.first).to_s.should.include 'Pods/Target Support Files/WatermelonLib/WatermelonLib-Unit-Tests-Info.plist'
         end
 
-        it 'returns the correct resource paths' do
-          @test_pod_target.resource_paths.should == {
-            'WatermelonLib' => [],
-            'WatermelonLib/Tests' => ['${PODS_CONFIGURATION_BUILD_DIR}/WatermelonLibTestResources.bundle'],
-            'WatermelonLib/SnapshotTests' => [],
-          }
-        end
-
-        it 'returns the correct framework paths' do
-          @test_pod_target.framework_paths.should == {
-            'WatermelonLib' => [
-              Target::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/WatermelonLib/WatermelonLib.framework'),
-            ],
-            'WatermelonLib/Tests' => [],
-            'WatermelonLib/SnapshotTests' => [],
-          }
-        end
-
         it 'returns correct whether a test spec uses Swift or not' do
-          @test_pod_target.uses_swift_for_non_library_spec?(@test_pod_target.test_specs[0]).should.be.true
-          @test_pod_target.uses_swift_for_non_library_spec?(@test_pod_target.test_specs[1]).should.be.false
+          @test_pod_target.uses_swift_for_spec?(@test_pod_target.test_specs[0]).should.be.true
+          @test_pod_target.uses_swift_for_spec?(@test_pod_target.test_specs[1]).should.be.false
         end
       end
     end

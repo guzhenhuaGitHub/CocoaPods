@@ -102,8 +102,6 @@ module Pod
     # be regenerated and ensuring that the directories exists.
     #
     def prepare
-      FileUtils.rm_rf(headers_root)
-
       FileUtils.mkdir_p(headers_root)
       FileUtils.mkdir_p(sources_root)
       FileUtils.mkdir_p(specifications_root)
@@ -134,7 +132,25 @@ module Pod
       root + 'Pods.xcodeproj'
     end
 
-    # @param [PodTarget] pod_target_name
+    # @return [Pathname] the path of the installation cache.
+    #
+    def project_installation_cache_path
+      root.join('.project_cache', 'installation_cache.yaml')
+    end
+
+    # @return [Pathname] the path of the metadata cache.
+    #
+    def project_metadata_cache_path
+      root.join('.project_cache', 'metadata_cache.yaml')
+    end
+
+    # @return [Pathname] the path of the version cache.
+    #
+    def project_version_cache_path
+      root.join('.project_cache', 'version')
+    end
+
+    # @param [String] pod_target_name
     # Name of the pod target used to generate the path of its Xcode project.
     #
     # @return [Pathname] the path of the project for a pod target.
